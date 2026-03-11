@@ -75,7 +75,16 @@ func GetSQLScript(name string) (string, error) {
 		}
 	}
 
-	// Try external embedded filesystem (from project root)
+	// Try default embedded FS (root scripts/sql, scripts/os copied to internal/scripts at build)
+	{
+		path := "sql/" + name
+		content, err := fs.ReadFile(defaultEmbeddedFS, path)
+		if err == nil {
+			return string(content), nil
+		}
+	}
+
+	// Try external embedded filesystem (from project root, legacy)
 	if ExternalEmbeddedFS != nil {
 		scriptPath := filepath.Join("scripts", "sql", name)
 		content, err := fs.ReadFile(ExternalEmbeddedFS, scriptPath)
@@ -109,7 +118,16 @@ func GetOSScript(name string) (string, error) {
 		}
 	}
 
-	// Try external embedded filesystem (from project root)
+	// Try default embedded FS (root scripts copied to internal/scripts at build)
+	{
+		path := "os/" + name
+		content, err := fs.ReadFile(defaultEmbeddedFS, path)
+		if err == nil {
+			return string(content), nil
+		}
+	}
+
+	// Try external embedded filesystem (legacy)
 	if ExternalEmbeddedFS != nil {
 		scriptPath := filepath.Join("scripts", "os", name)
 		content, err := fs.ReadFile(ExternalEmbeddedFS, scriptPath)
@@ -198,7 +216,14 @@ func SearchScripts(pattern string) ([]ScriptInfo, error) {
 		}
 	}
 
-	// Try external embedded filesystem
+	// Try default embedded FS (sql + os at root of embed)
+	searchInEmbeddedFS(defaultEmbeddedFS, "sql", regex, &results)
+	searchInEmbeddedFS(defaultEmbeddedFS, "os", regex, &results)
+	if len(results) > 0 {
+		return results, nil
+	}
+
+	// Try external embedded filesystem (legacy)
 	if ExternalEmbeddedFS != nil {
 		searchInEmbeddedFS(ExternalEmbeddedFS, "scripts", regex, &results)
 		if len(results) > 0 {
@@ -261,14 +286,16 @@ func searchInEmbeddedFS(embeddedFS fs.FS, basePath string, matcher func(string) 
 			return nil
 		}
 
-		// Extract filename and type
-		parts := strings.Split(path, string(filepath.Separator))
-		if len(parts) < 3 {
+		// Extract filename and type (support "sql/we.sql" and "scripts/sql/we.sql")
+		parts := strings.Split(path, "/")
+		if len(parts) < 2 {
 			return nil
 		}
-
-		scriptType := parts[1] // "sql" or "os"
+		scriptType := parts[0] // "sql" or "os" for defaultEmbeddedFS; "scripts" for legacy
 		filename := parts[len(parts)-1]
+		if scriptType == "scripts" && len(parts) >= 3 {
+			scriptType = parts[1] // "sql" or "os"
+		}
 
 		if !matcher(filename) {
 			return nil
@@ -382,7 +409,24 @@ func ReadScriptContent(filename string) (string, bool, error) {
 		}
 	}
 
-	// Try external embedded filesystem
+	// Try default embedded FS
+	{
+		var path string
+		if strings.HasSuffix(filename, ".sql") {
+			path = "sql/" + filename
+		} else {
+			path = "os/" + filename
+		}
+		content, err := fs.ReadFile(defaultEmbeddedFS, path)
+		if err == nil {
+			if !utf8.Valid(content) {
+				return "", true, nil
+			}
+			return string(content), false, nil
+		}
+	}
+
+	// Try external embedded filesystem (legacy)
 	if ExternalEmbeddedFS != nil {
 		var scriptPath string
 		if strings.HasSuffix(filename, ".sql") {
@@ -390,7 +434,6 @@ func ReadScriptContent(filename string) (string, bool, error) {
 		} else {
 			scriptPath = filepath.Join("scripts", "os", filename)
 		}
-
 		content, err := fs.ReadFile(ExternalEmbeddedFS, scriptPath)
 		if err == nil {
 			if !utf8.Valid(content) {

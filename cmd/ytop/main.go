@@ -72,7 +72,18 @@ func runMonitor() {
 	}
 	defer logger.Close()
 
-	// Create connector
+	// Check if only finding scripts or reading script content (no database connection needed)
+	if cfg.FindScript != "" {
+		handleFindScript(cfg.FindScript)
+		return
+	}
+
+	if cfg.ReadScript != "" {
+		handleReadScript(cfg.ReadScript)
+		return
+	}
+
+	// Create connector (for database operations)
 	conn, err := connector.NewConnector(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating connector: %v\n", err)
@@ -87,9 +98,9 @@ func runMonitor() {
 	}
 	defer conn.Close()
 
-	// Check if in direct execution mode (-f or -q or -r or --copy or --find)
+	// Check if in direct execution mode (-f or -q or -r)
 	if cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
-	   cfg.CopyScript != "" || cfg.FindScript != "" {
+	   cfg.CopyScript != "" {
 		runDirectExecution(ctx, cfg, conn)
 		return
 	}
@@ -103,12 +114,6 @@ func runDirectExecution(ctx context.Context, cfg *config.Config, conn connector.
 	exec := executor.NewExecutor(cfg, conn)
 
 	// Handle different execution modes
-	if cfg.ReadScript != "" {
-		// Read script content
-		handleReadScript(cfg.ReadScript)
-		return
-	}
-
 	if cfg.CopyScript != "" {
 		// Copy script to destination
 		handleCopyScript(ctx, cfg, exec)
@@ -375,22 +380,29 @@ func runInteractiveMonitor(ctx context.Context, cfg *config.Config, conn connect
 					if sqlStmt != "" {
 						output, err := exec.ExecuteAdHocSQL(ctx, sqlStmt)
 						if err != nil {
-							fmt.Fprintf(os.Stderr, "\nError executing SQL: %v\n", err)
+							fmt.Fprintf(os.Stderr, "\r\nError executing SQL: %v\r\n", err)
 						}
-						fmt.Println("\n" + output)
-						scripts.WriteCommandOutput("adhoc_sql", output)
-						fmt.Printf("\nOutput saved to file\n")
+						// In raw mode use \r\n so output aligns (same as 's' key)
+						if output != "" {
+							fmt.Print("\r\n")
+							displayOutput := strings.ReplaceAll(output, "\n", "\r\n")
+							fmt.Print(displayOutput)
+							fmt.Print("\r\n")
+						}
 
 						// Resume keyboard reading before waiting for key press
 						pauseReadChan <- false
 
 						// Wait for key press (read from rawInputChan)
-						fmt.Print("\nPress any key to continue...")
+						fmt.Print("\r\nPress any key to continue...")
 						<-rawInputChan
 						fmt.Println()
 
 						// Pause again for cleanup (will be resumed at end)
 						pauseReadChan <- true
+
+						// Resume keyboard reading (same as 's' key)
+						pauseReadChan <- false
 					} else {
 						// User cancelled, resume keyboard reading
 						pauseReadChan <- false
@@ -492,14 +504,9 @@ func runInteractiveMonitor(ctx context.Context, cfg *config.Config, conn connect
 							fmt.Print("\r\n")
 						}
 
-						// Save output to file
-						if output != "" && !cancelled {
-							scripts.WriteCommandOutput(command, output)
-							fmt.Printf("\r\n\r\nOutput saved to file\r\n")
-						} else if cmdErr == nil && output == "" && !cancelled {
+						if cmdErr == nil && output == "" && !cancelled {
 							fmt.Printf("\r\n\r\nNo output generated\r\n")
 						} else if cmdErr != nil {
-							// Error occurred, don't show "Output saved"
 							fmt.Printf("\r\n")
 						}
 

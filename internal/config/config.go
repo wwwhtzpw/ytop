@@ -52,7 +52,7 @@ type Config struct {
 	ExecuteSQL     string // -q: SQL query to execute
 	ReadScript     string // -r: read/view script content
 	CopyScript     string // -c: copy script (format: "script dest")
-	FindScript     string // --find: find/search scripts
+	FindScript     string // -S: find/search scripts
 }
 
 // DefaultConfig returns a config with default values
@@ -108,6 +108,7 @@ func LoadConfig() (*Config, error) {
 	connectionMode := flag.String("mode", "", "Connection mode: local or ssh")
 	yasqlPath := flag.String("yasql", "", "Path to yasql executable")
 	connectString := flag.String("connect", "", "Connection string")
+	connectStringShort := flag.String("C", "", "Connection string (short)")
 	sshHost := flag.String("ssh-host", "", "SSH host")
 	sshHostShort := flag.String("h", "", "SSH host (short)")
 	sshPort := flag.Int("ssh-port", 0, "SSH port")
@@ -134,7 +135,7 @@ func LoadConfig() (*Config, error) {
 	executeSQL := flag.String("q", "", "Execute SQL query directly (non-interactive mode)")
 	readScript := flag.String("r", "", "Read/view script content (non-interactive mode)")
 	copyScript := flag.String("copy", "", "Copy script to destination (format: 'script dest', non-interactive mode)")
-	findScript := flag.String("find", "", "Find/search scripts by pattern (non-interactive mode)")
+	findScript := flag.String("S", "", "Find/search scripts by pattern (non-interactive mode)")
 
 	flag.Parse()
 
@@ -154,6 +155,9 @@ func LoadConfig() (*Config, error) {
 	}
 	if *connectString != "" {
 		cfg.ConnectString = *connectString
+	}
+	if *connectStringShort != "" {
+		cfg.ConnectString = *connectStringShort
 	}
 	if *sshHost != "" {
 		cfg.SSHHost = *sshHost
@@ -425,10 +429,9 @@ func PrintUsage() {
 	fmt.Println("  ytop [global options] [interval] [count]           # Monitor mode (default)")
 	fmt.Println("  ytop -f <script> [global options] [interval] [count] # Execute script directly")
 	fmt.Println("  ytop -q <sql> [global options] [interval] [count]    # Execute SQL directly")
-	fmt.Println("  ytop -r <script> [global options]                    # Read script content")
-	fmt.Println("  ytop --copy <script dest> [global options]           # Copy script to destination")
-	fmt.Println("  ytop --find <pattern> [global options]               # Find scripts by pattern")
-	fmt.Println("  ytop --plan [global options]                         # Show SQL plan")
+	fmt.Println("  ytop -r <script>                                 # Read script content")
+	fmt.Println("  ytop -c <script dest>                               # Copy script to destination")
+	fmt.Println("  ytop -S <pattern>                                    # Find scripts by pattern")
 	fmt.Println("  ytop sesstat|stat [global options] [stat options]  # Session statistics query")
 	fmt.Println("  ytop sesevent|event [global options] [event options] # Session events query")
 	fmt.Println("  ytop --help|help                                   # Show this help")
@@ -455,8 +458,7 @@ func PrintUsage() {
 	fmt.Println("  -q <sql>              Execute SQL query directly without entering monitor UI")
 	fmt.Println("  -r <script>           Read/view script content without entering monitor UI")
 	fmt.Println("  --copy <script dest>  Copy script to destination (e.g., 'we.sql /tmp')")
-	fmt.Println("  --find <pattern>      Find/search scripts by pattern (supports regex)")
-	fmt.Println("  --plan                Show SQL plan for current session")
+	fmt.Println("  -S <pattern>           Find/search scripts by pattern (supports regex)")
 	fmt.Println("\nMonitor Mode Examples:")
 	fmt.Println("  ytop                                    # Default: 5 second interval, 5 iterations")
 	fmt.Println("  ytop 2                                  # 2 second interval, 5 iterations")
@@ -475,10 +477,9 @@ func PrintUsage() {
 	fmt.Println("  ytop --copy 'we.sql /tmp'               # Copy we.sql to /tmp")
 	fmt.Println("  ytop --copy 'we.sql'                    # Copy we.sql to /tmp (default)")
 	fmt.Println("  ytop -h 10.10.10.130 --copy 'we.sql /opt'  # Copy to remote server")
-	fmt.Println("  ytop --find '.*'                        # List all scripts")
-	fmt.Println("  ytop --find '^awr'                      # Find scripts starting with 'awr'")
-	fmt.Println("  ytop --find 'session'                   # Find scripts containing 'session'")
-	fmt.Println("  ytop --plan                             # Show SQL plan for current session")
+	fmt.Println("  ytop -S '.*'                             # List all scripts")
+	fmt.Println("  ytop -S '^awr'                          # Find scripts starting with 'awr'")
+	fmt.Println("  ytop -S 'session'                        # Find scripts containing 'session'")
 	fmt.Println("\nSubcommands:")
 	fmt.Println("  sesstat, stat         Query session statistics (v$sesstat)")
 	fmt.Println("  sesevent, event       Query session events (v$session_event)")

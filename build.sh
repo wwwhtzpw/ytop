@@ -210,17 +210,6 @@ WRAPPER_EOF
     fi
 }
 
-# Copy scripts to build directory
-copy_scripts_to_build() {
-    print_msg "$YELLOW" "Copying scripts directory to build..."
-    cp -r scripts "$BUILD_DIR/"
-    if [ $? -eq 0 ]; then
-        print_msg "$GREEN" "✓ Scripts copied to ${BUILD_DIR}/scripts/"
-    else
-        print_msg "$RED" "✗ Failed to copy scripts directory"
-    fi
-}
-
 # Clean build directory
 clean_build() {
     print_msg "$YELLOW" "Cleaning build directory..."
@@ -304,9 +293,6 @@ build_all() {
     # macOS
     build_platform "darwin" "amd64" ""
     build_platform "darwin" "arm64" ""
-
-    # Copy scripts directory to build directory
-    copy_scripts_to_build
 }
 
 # Build Linux only
@@ -314,7 +300,6 @@ build_linux() {
     print_header "Building for Linux"
     build_platform "linux" "amd64" ""
     build_platform "linux" "arm64" ""
-    copy_scripts_to_build
 }
 
 # Build Windows only
@@ -322,7 +307,6 @@ build_windows() {
     print_header "Building for Windows"
     build_platform "windows" "amd64" ".exe"
     build_platform "windows" "arm64" ".exe"
-    copy_scripts_to_build
 }
 
 # Build macOS only
@@ -330,7 +314,6 @@ build_macos() {
     print_header "Building for macOS"
     build_platform "darwin" "amd64" ""
     build_platform "darwin" "arm64" ""
-    copy_scripts_to_build
 }
 
 # Build current platform only
@@ -346,9 +329,6 @@ build_current() {
     fi
 
     build_platform "$current_os" "$current_arch" "$ext"
-
-    # Copy scripts directory to build directory
-    copy_scripts_to_build
 }
 
 # Show build summary
@@ -461,6 +441,17 @@ main() {
     update_version_file
     echo ""
 
+    # Copy root scripts/sql and scripts/os to internal/scripts for embedding (required for go:embed)
+    if [ -d "scripts/sql" ] && [ -d "scripts/os" ]; then
+        print_msg "$YELLOW" "Copying root scripts/sql and scripts/os to internal/scripts for embed..."
+        rm -rf internal/scripts/sql internal/scripts/os
+        cp -r scripts/sql scripts/os internal/scripts/
+        print_msg "$GREEN" "✓ Scripts copied for embed"
+    else
+        print_msg "$RED" "✗ scripts/sql or scripts/os not found, embed may be empty"
+    fi
+    echo ""
+
     # Clean if requested
     if [ "$do_clean" = true ]; then
         clean_build
@@ -489,6 +480,12 @@ main() {
 
     # Show summary
     show_summary
+
+    # Remove copied scripts (used only for embed during build)
+    if [ -d "internal/scripts/sql" ] || [ -d "internal/scripts/os" ]; then
+        rm -rf internal/scripts/sql internal/scripts/os
+        print_msg "$GREEN" "✓ Removed internal/scripts/sql and internal/scripts/os"
+    fi
 
     print_msg "$GREEN" "✓ Build process complete!"
 }

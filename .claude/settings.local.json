@@ -39,7 +39,10 @@
       "Bash(rm -rf /Users/yihan/tool/develop/yastop/build/scripts && sh ./build.sh --current 2>&1 | grep -i script)",
       "Bash(cd /Users/yihan/tool/develop/yastop && sh ./build.sh --current 2>&1 | tail -10)",
       "Bash(cd /Users/yihan/tool/develop/yastop/build && ./ytop_darwin_arm64 -h 10.10.10.130 -f we.sql 2>&1 | head -8)",
-      "Bash(cd /Users/yihan/tool/develop/yastop && sh ./build.sh -a 2>&1 | tail -15)"
+      "Bash(cd /Users/yihan/tool/develop/yastop && sh ./build.sh -a 2>&1 | tail -15)",
+      "Bash(scp -r /Users/yihan/tool/develop/yastop/build/scripts yashan@10.10.10.130:~/)",
+      "Bash(ssh yashan@10.10.10.130 \"chmod +x ~/ytop_linux_arm64 && ~/ytop_linux_arm64 --help\")",
+      "Bash(ssh yashan@10.10.10.130 \"~/ytop_linux_arm64 -C '/ as sysdba'\" 2>&1)"
     ]
   }
 }

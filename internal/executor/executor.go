@@ -345,7 +345,7 @@ func (e *Executor) executeAdHocSQLViaSSH(ctx context.Context, sql string) (strin
 	}
 
 	// Build yasql command with -c flag
-	// Use shellEscape to properly escape the SQL statement
+	// Use ShellEscape to properly escape the SQL statement
 	yasqlCmd := fmt.Sprintf("%s -S %s -c %s",
 		e.cfg.YasqlPath,
 		utils.ShellEscape(e.cfg.ConnectString),
