@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -53,11 +54,11 @@ func getScriptDir() (string, error) {
 	return "", fmt.Errorf("scripts directory not found")
 }
 
-// GetSQLScript loads a SQL script from embedded files or filesystem
+// GetSQLScript loads a SQL script from embedded files or filesystem.
+// Explicit OS paths (e.g. ./we.sql, d:\we.sql) are read from the filesystem first; otherwise embedded/scripts dir.
 func GetSQLScript(name string) (string, error) {
-	// Check if it's an explicit path (absolute or relative)
 	if isExplicitPath(name) {
-		// Read from filesystem
+		// Explicit path: read from OS filesystem
 		content, err := os.ReadFile(name)
 		if err != nil {
 			return "", fmt.Errorf("failed to read SQL script from filesystem %s: %w", name, err)
@@ -96,11 +97,11 @@ func GetSQLScript(name string) (string, error) {
 	return "", fmt.Errorf("failed to read SQL script %s", name)
 }
 
-// GetOSScript loads an OS script from embedded files or filesystem
+// GetOSScript loads an OS script from embedded files or filesystem.
+// Explicit OS paths (e.g. ./foo.sh, d:\foo.sh) are read from the filesystem first; otherwise embedded/scripts dir.
 func GetOSScript(name string) (string, error) {
-	// Check if it's an explicit path (absolute or relative)
 	if isExplicitPath(name) {
-		// Read from filesystem
+		// Explicit path: read from OS filesystem
 		content, err := os.ReadFile(name)
 		if err != nil {
 			return "", fmt.Errorf("failed to read OS script from filesystem %s: %w", name, err)
@@ -139,11 +140,20 @@ func GetOSScript(name string) (string, error) {
 	return "", fmt.Errorf("failed to read OS script %s", name)
 }
 
-// isExplicitPath checks if path is an explicit filesystem path
+// isExplicitPath checks if path is an explicit OS filesystem path (not an embedded script name).
+// When true, script is read from the OS (e.g. ./we.sql, /tmp/we.sql, d:\we.sql).
 func isExplicitPath(path string) bool {
-	// Absolute path
+	// Absolute path (Unix /path or Windows C:\path)
 	if filepath.IsAbs(path) {
 		return true
+	}
+
+	// Windows-style drive letter (e.g. d:\we.sql, D:/we.sql) — recognize on all platforms
+	if len(path) >= 3 {
+		c := path[0]
+		if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') && path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+			return true
+		}
 	}
 
 	// Relative path with ./ or ../
@@ -187,13 +197,9 @@ type ScriptInfo struct {
 	Description string
 }
 
-// SearchScripts searches for scripts matching pattern
+// SearchScripts searches for scripts matching pattern (filesystem first, then embedded FS)
 func SearchScripts(pattern string) ([]ScriptInfo, error) {
-	// First try filesystem
-	scriptsDir, err := getScriptDir()
-	if err != nil && scriptsDir == "" {
-		return nil, fmt.Errorf("failed to locate scripts directory: %w", err)
-	}
+	scriptsDir, _ := getScriptDir() // ignore err; always fall back to embedded FS
 
 	// Compile regex pattern
 	regex, err := getRegexForPattern(pattern)
@@ -203,7 +209,7 @@ func SearchScripts(pattern string) ([]ScriptInfo, error) {
 
 	var results []ScriptInfo
 
-	// Search in filesystem
+	// Search in filesystem when scripts dir is available
 	if scriptsDir != "" {
 		sqlDir := filepath.Join(scriptsDir, "sql")
 		searchInDirectory(sqlDir, "sql", regex, &results)
@@ -216,7 +222,7 @@ func SearchScripts(pattern string) ([]ScriptInfo, error) {
 		}
 	}
 
-	// Try default embedded FS (sql + os at root of embed)
+	// Search default embedded FS (same as GetSQLScript/GetOSScript: sql/ and os/ at embed root)
 	searchInEmbeddedFS(defaultEmbeddedFS, "sql", regex, &results)
 	searchInEmbeddedFS(defaultEmbeddedFS, "os", regex, &results)
 	if len(results) > 0 {
@@ -234,18 +240,14 @@ func SearchScripts(pattern string) ([]ScriptInfo, error) {
 	return []ScriptInfo{}, nil
 }
 
-// getRegexForPattern creates a regex matcher for the pattern
+// getRegexForPattern creates a regex matcher for the pattern (supports full regex, e.g. .* for all, snapshot|user for alternation)
 func getRegexForPattern(pattern string) (func(string) bool, error) {
-	if pattern == ".*" {
-		// Match everything
-		return func(s string) bool {
-			return true
-		}, nil
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex %q: %w", pattern, err)
 	}
-
-	// Use simple contains matching for simplicity
 	return func(s string) bool {
-		return strings.Contains(s, pattern)
+		return re.MatchString(s)
 	}, nil
 }
 

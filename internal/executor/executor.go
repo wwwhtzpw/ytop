@@ -62,12 +62,8 @@ func (e *Executor) executeSQLScript(ctx context.Context, scriptName string) (str
 	// Prompt for variable values
 	varMap := make(map[string]string)
 	for _, variable := range variables {
-		// Display variable with its prefix
+		// Display variable with its prefix; Enter without typing = empty value (replace with "")
 		value := terminal.PromptInput(fmt.Sprintf("\r\nEnter value for %s: ", variable), 256)
-		if value == "" {
-			// User pressed ESC or entered empty value
-			return "", fmt.Errorf("cancelled or empty value for %s", variable)
-		}
 		varMap[variable] = value
 	}
 
@@ -164,6 +160,11 @@ func (e *Executor) executeOSCommand(ctx context.Context, input string) (string, 
 		if err == nil {
 			// Execute embedded script
 			return e.executeOSScript(ctx, scriptContent)
+		}
+		// Input looks like a script name (e.g. db_size.sl) but script not found:
+		// do not run as shell command to avoid SSH and confusing "command not found"
+		if strings.Contains(input, ".") {
+			return "", fmt.Errorf("script not found: %s", input)
 		}
 	}
 

@@ -23,7 +23,7 @@ SELECT a.username,
        TO_CHAR (a.lock_date, 'mm-dd hh24') locktime,
        TO_CHAR (a.expiry_date, 'mm-dd hh24') expiretime
   FROM dba_users a,sys.user$ b
- WHERE a.username =nvl(upper('&user'), a.username)
+ WHERE a.username =nvl(upper('&&user'), a.username)
        AND a.username=b.name
  order by status
 /

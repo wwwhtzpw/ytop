@@ -17,9 +17,10 @@ BINARY_NAME="ytop"
 BUILD_DIR="build"
 CMD_PATH="./cmd/ytop"
 
-# Version information
-VERSION=$(date -u '+%Y%m%d_%H%M%S')
-BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+# Version information (China timezone)
+TZ_CN="Asia/Shanghai"
+VERSION=$(TZ=$TZ_CN date '+%Y%m%d_%H%M%S')
+BUILD_TIME=$(TZ=$TZ_CN date '+%Y-%m-%d %H:%M:%S CST')
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 # LDFLAGS for anti-decompilation and optimization
@@ -364,7 +365,7 @@ package main
 
 // Version information
 // This file is automatically updated by build.sh
-// Last updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+// Last updated: $(TZ=$TZ_CN date '+%Y-%m-%d %H:%M:%S CST')
 var (
 	Version   = "${VERSION}"
 	BuildTime = "${BUILD_TIME}"
