@@ -1,7 +1,0 @@
-
-DUMMY 
------ 
-X    
-
-1 row fetched.
-
