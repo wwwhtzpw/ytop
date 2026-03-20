@@ -442,16 +442,8 @@ main() {
     update_version_file
     echo ""
 
-    # Copy root scripts/sql and scripts/os to internal/scripts for embedding (required for go:embed)
-    if [ -d "scripts/sql" ] && [ -d "scripts/os" ]; then
-        print_msg "$YELLOW" "Copying root scripts/sql and scripts/os to internal/scripts for embed..."
-        rm -rf internal/scripts/sql internal/scripts/os
-        cp -r scripts/sql scripts/os internal/scripts/
-        print_msg "$GREEN" "✓ Scripts copied for embed"
-    else
-        print_msg "$RED" "✗ scripts/sql or scripts/os not found, embed may be empty"
-    fi
-    echo ""
+    # Note: scripts are now located in internal/scripts/sql and internal/scripts/os
+    # No need to copy them for embedding as they're already in the correct location
 
     # Clean if requested
     if [ "$do_clean" = true ]; then
@@ -482,11 +474,7 @@ main() {
     # Show summary
     show_summary
 
-    # Remove copied scripts (used only for embed during build)
-    if [ -d "internal/scripts/sql" ] || [ -d "internal/scripts/os" ]; then
-        rm -rf internal/scripts/sql internal/scripts/os
-        print_msg "$GREEN" "✓ Removed internal/scripts/sql and internal/scripts/os"
-    fi
+    # Note: scripts are now permanently in internal/scripts/, no cleanup needed
 
     print_msg "$GREEN" "✓ Build process complete!"
 }

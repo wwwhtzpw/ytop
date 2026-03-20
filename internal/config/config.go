@@ -111,7 +111,8 @@ func LoadConfig() (*Config, error) {
 	connectStringShort := flag.String("C", "", "Connection string (short)")
 	sshHost := flag.String("ssh-host", "", "SSH host")
 	sshHostShort := flag.String("h", "", "SSH host (short)")
-	sshPort := flag.Int("ssh-port", 0, "SSH port")
+	port := flag.Int("port", 0, "SSH port")
+	portShort := flag.Int("P", 0, "SSH port (short)")
 	sshUser := flag.String("ssh-user", "", "SSH user")
 	sshUserShort := flag.String("u", "", "SSH user (short)")
 	sshPassword := flag.String("ssh-password", "", "SSH password")
@@ -165,8 +166,11 @@ func LoadConfig() (*Config, error) {
 	if *sshHostShort != "" {
 		cfg.SSHHost = *sshHostShort
 	}
-	if *sshPort > 0 {
-		cfg.SSHPort = *sshPort
+	if *port != 0 {  // Changed from > 0 to != 0 to handle both positive and default values
+		cfg.SSHPort = *port
+	}
+	if *portShort != 0 {  // Handle short parameter -P
+		cfg.SSHPort = *portShort
 	}
 	if *sshUser != "" {
 		cfg.SSHUser = *sshUser
@@ -441,7 +445,7 @@ func PrintUsage() {
 	fmt.Println("  --yasql <path>        Path to yasql executable (default: yasql)")
 	fmt.Println("  -C, --connect <string> Connection string (default: / as sysdba)")
 	fmt.Println("  -h, --host <host>     SSH host (if specified, use SSH mode; otherwise local mode)")
-	fmt.Println("  --port <port>         SSH port (default: 22)")
+	fmt.Println("  -P, --port <port>     SSH port (default: 22)")
 	fmt.Println("  -u, --user <user>     SSH user")
 	fmt.Println("  -p, --password <pass> SSH password")
 	fmt.Println("  -k, --key <file>      SSH private key file")
@@ -498,6 +502,7 @@ func PrintSesstatUsage() {
 	fmt.Println("  -n, --stat <names>    Statistic name filter (comma-separated, supports % wildcard)")
 	fmt.Println("\nGlobal Options:")
 	fmt.Println("  -h, --host <host>     SSH host (if specified, use SSH mode; otherwise local mode)")
+	fmt.Println("  -P, --port <port>     SSH port (default: 22)")
 	fmt.Println("  -u, --user <user>     SSH user")
 	fmt.Println("  -p, --password <pass> SSH password")
 	fmt.Println("  -k, --key <file>      SSH private key file")
@@ -532,6 +537,7 @@ func PrintSeseventUsage() {
 	fmt.Println("  -e, --event <names>   Event name filter (comma-separated, supports % wildcard)")
 	fmt.Println("\nGlobal Options:")
 	fmt.Println("  -h, --host <host>     SSH host (if specified, use SSH mode; otherwise local mode)")
+	fmt.Println("  -P, --port <port>     SSH port (default: 22)")
 	fmt.Println("  -u, --user <user>     SSH user")
 	fmt.Println("  -p, --password <pass> SSH password")
 	fmt.Println("  -k, --key <file>      SSH private key file")

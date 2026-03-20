@@ -42,7 +42,16 @@
       "Bash(cd /Users/yihan/tool/develop/yastop && sh ./build.sh -a 2>&1 | tail -15)",
       "Bash(scp -r /Users/yihan/tool/develop/yastop/build/scripts yashan@10.10.10.130:~/)",
       "Bash(ssh yashan@10.10.10.130 \"chmod +x ~/ytop_linux_arm64 && ~/ytop_linux_arm64 --help\")",
-      "Bash(ssh yashan@10.10.10.130 \"~/ytop_linux_arm64 -C '/ as sysdba'\" 2>&1)"
+      "Bash(ssh yashan@10.10.10.130 \"~/ytop_linux_arm64 -C '/ as sysdba'\" 2>&1)",
+      "Bash(go build ./internal/config/...)",
+      "Bash(go build ./...)",
+      "Bash(go build ./internal/config/... ./internal/connector/...)",
+      "Bash(./ytop --help | grep -A2 -B2 \"port\")",
+      "Bash(go run ./cmd/ytop --help 2>&1 | grep -A2 -B2 \"port\")",
+      "Bash(go run ./cmd/ytop sesstat --help 2>&1 | grep -A2 -B2 \"port\")",
+      "Bash(cd internal/scripts && ln -s ../../scripts/sql sql && ln -s ../../scripts/os os)",
+      "Bash(go run ./cmd/ytop --help 2>&1 | grep -A1 \"port\")",
+      "Bash(go build ./internal/connector/...)"
     ]
   }
 }

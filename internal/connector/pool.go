@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,12 +70,12 @@ func (p *SSHConnectionPool) Connect(ctx context.Context) error {
 	if p.cfg.SSHKeyFile != "" {
 		key, err := readSSHKey(p.cfg.SSHKeyFile)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read SSH key file '%s': %w", p.cfg.SSHKeyFile, err)
 		}
 
 		signer, err := ssh.ParsePrivateKey(key)
 		if err != nil {
-			return fmt.Errorf("failed to parse SSH key: %w", err)
+			return fmt.Errorf("failed to parse SSH key file '%s': %w", p.cfg.SSHKeyFile, err)
 		}
 
 		sshConfig.Auth = append(sshConfig.Auth, ssh.PublicKeys(signer))
@@ -82,9 +83,58 @@ func (p *SSHConnectionPool) Connect(ctx context.Context) error {
 
 	// Connect to SSH server
 	addr := fmt.Sprintf("%s:%d", p.cfg.SSHHost, p.cfg.SSHPort)
+
+	// Build connection info for debugging
+	var authMethod string
+	if p.cfg.SSHPassword != "" && p.cfg.SSHKeyFile != "" {
+		authMethod = "password + key"
+	} else if p.cfg.SSHPassword != "" {
+		authMethod = "password"
+	} else if p.cfg.SSHKeyFile != "" {
+		authMethod = "key"
+	} else {
+		authMethod = "none"
+	}
+
+	if p.cfg.DebugMode {
+		logger.Debug("SSH Connection attempt:\n")
+		logger.Debug("  Host: %s\n", p.cfg.SSHHost)
+		logger.Debug("  Port: %d\n", p.cfg.SSHPort)
+		logger.Debug("  User: %s\n", p.cfg.SSHUser)
+		logger.Debug("  Auth: %s\n", authMethod)
+		if p.cfg.SSHKeyFile != "" {
+			logger.Debug("  Key file: %s\n", p.cfg.SSHKeyFile)
+		}
+	}
+
 	client, err := ssh.Dial("tcp", addr, sshConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to SSH server: %w", err)
+		// Build detailed error message with connection info
+		var errorMsg strings.Builder
+		fmt.Fprintf(&errorMsg, "SSH connection failed:\n")
+		fmt.Fprintf(&errorMsg, "  Host: %s\n", p.cfg.SSHHost)
+		fmt.Fprintf(&errorMsg, "  Port: %d\n", p.cfg.SSHPort)
+		fmt.Fprintf(&errorMsg, "  User: %s\n", p.cfg.SSHUser)
+		fmt.Fprintf(&errorMsg, "  Auth method: %s\n", authMethod)
+		if p.cfg.SSHKeyFile != "" {
+			fmt.Fprintf(&errorMsg, "  Key file: %s\n", p.cfg.SSHKeyFile)
+		}
+
+		// Build test command for user
+		fmt.Fprintf(&errorMsg, "\nTest command:\n")
+		if p.cfg.SSHKeyFile != "" {
+			// Use key file authentication
+			fmt.Fprintf(&errorMsg, "  ssh -i %s -p %d %s@%s\n",
+				p.cfg.SSHKeyFile, p.cfg.SSHPort, p.cfg.SSHUser, p.cfg.SSHHost)
+		} else {
+			// Use password authentication
+			fmt.Fprintf(&errorMsg, "  ssh -p %d %s@%s\n",
+				p.cfg.SSHPort, p.cfg.SSHUser, p.cfg.SSHHost)
+		}
+
+		fmt.Fprintf(&errorMsg, "\nOriginal error: %v\n", err)
+
+		return fmt.Errorf("%s", errorMsg.String())
 	}
 
 	p.client = client

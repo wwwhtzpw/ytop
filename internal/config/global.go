@@ -42,7 +42,8 @@ func ParseGlobalFlags(fs *flag.FlagSet) *GlobalFlags {
 	fs.StringVar(&gf.SSHHost, "host", "", "SSH host")
 	fs.StringVar(&gf.SSHHost, "h", "", "SSH host (short)")
 
-	fs.IntVar(&gf.SSHPort, "port", 22, "SSH port")
+	fs.IntVar(&gf.SSHPort, "port", 0, "SSH port")
+	fs.IntVar(&gf.SSHPort, "P", 0, "SSH port (short)")
 
 	fs.StringVar(&gf.SSHUser, "user", "", "SSH user")
 	fs.StringVar(&gf.SSHUser, "u", "", "SSH user (short)")
@@ -97,7 +98,7 @@ func (gf *GlobalFlags) ApplyToConfig(cfg *Config) {
 	if gf.SSHHost != "" {
 		cfg.SSHHost = gf.SSHHost
 	}
-	if gf.SSHPort > 0 {
+	if gf.SSHPort != 0 {  // Changed from > 0 to != 0 to handle default value properly
 		cfg.SSHPort = gf.SSHPort
 	}
 	if gf.SSHUser != "" {
