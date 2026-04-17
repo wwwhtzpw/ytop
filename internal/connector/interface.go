@@ -10,6 +10,9 @@ type Connector interface {
 	// ExecuteQuery executes a SQL query and returns rows as string slices
 	ExecuteQuery(ctx context.Context, sql string) ([][]string, error)
 
+	// ExecuteQueryWithHeader executes a SQL query and returns header + data rows
+	ExecuteQueryWithHeader(ctx context.Context, sql string) (header []string, rows [][]string, err error)
+
 	// Close closes the connection
 	Close() error
 

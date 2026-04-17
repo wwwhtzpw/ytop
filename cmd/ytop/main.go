@@ -16,6 +16,7 @@ import (
 	"github.com/yihan/ytop/internal/display"
 	"github.com/yihan/ytop/internal/executor"
 	"github.com/yihan/ytop/internal/logger"
+	"github.com/yihan/ytop/internal/metric"
 	"github.com/yihan/ytop/internal/models"
 	"github.com/yihan/ytop/internal/scripts"
 	"github.com/yihan/ytop/internal/terminal"
@@ -61,7 +62,6 @@ func runMonitor() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
-		config.PrintUsage()
 		os.Exit(1)
 	}
 
@@ -98,6 +98,12 @@ func runMonitor() {
 	}
 	defer conn.Close()
 
+	// Check if in metric mode (--metric with -f)
+	if cfg.MetricMode && cfg.ExecuteScript != "" {
+		runMetricMode(ctx, cfg, conn)
+		return
+	}
+
 	// Check if in direct execution mode (-f or -q or -r)
 	if cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
 	   cfg.CopyScript != "" {
@@ -107,6 +113,15 @@ func runMonitor() {
 
 	// Continue with interactive monitoring mode
 	runInteractiveMonitor(ctx, cfg, conn)
+}
+
+// runMetricMode runs the metric collection mode with delta calculation
+func runMetricMode(ctx context.Context, cfg *config.Config, conn connector.Connector) {
+	runner := metric.NewRunner(cfg, conn, cfg.ExecuteScript)
+	if err := runner.Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runDirectExecution executes script or SQL directly without entering monitoring UI

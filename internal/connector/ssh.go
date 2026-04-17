@@ -127,6 +127,61 @@ func (c *SSHConnector) ExecuteQuery(ctx context.Context, sql string) ([][]string
 	return parseYasqlOutput(string(output))
 }
 
+// ExecuteQueryWithHeader executes a SQL query and returns header + data rows
+func (c *SSHConnector) ExecuteQueryWithHeader(ctx context.Context, sql string) (header []string, rows [][]string, err error) {
+	if !c.connected {
+		return nil, nil, fmt.Errorf("not connected")
+	}
+
+	// Create new session from pool
+	session, err := c.pool.NewSession()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer session.Close()
+
+	// Build command
+	var cmdParts []string
+
+	// Add source command if specified
+	if c.cfg.SourceCmd != "" {
+		cmdParts = append(cmdParts, c.cfg.SourceCmd)
+	}
+
+	// Prepare yasql command with -S flag for silent mode and -c for SQL execution
+	yasqlCmd := fmt.Sprintf("%s -S", c.cfg.YasqlPath)
+
+	if c.cfg.ConnectString != "" {
+		yasqlCmd += " " + utils.ShellEscape(c.cfg.ConnectString)
+	}
+
+	// Add -c flag with SQL command
+	yasqlCmd += " -c " + utils.ShellEscape(sql)
+
+	fullCmd := yasqlCmd
+	if len(cmdParts) > 0 {
+		fullCmd = strings.Join(cmdParts, " && ") + " && " + fullCmd
+	}
+
+	if c.cfg.DebugMode {
+		logger.Debug("SSH command: %s\n", fullCmd)
+		logger.Debug("SQL: %s\n", sql)
+	}
+
+	// Execute command
+	output, err := session.CombinedOutput(fullCmd)
+	if err != nil {
+		return nil, nil, fmt.Errorf("SSH command execution failed: %w, output: %s", err, string(output))
+	}
+
+	if c.cfg.DebugMode {
+		logger.Debug("Output: %s\n", string(output))
+	}
+
+	// Parse output with header
+	return ParseYasqlOutputWithHeader(string(output))
+}
+
 // Close closes the SSH connection
 func (c *SSHConnector) Close() error {
 	if c.pool != nil {

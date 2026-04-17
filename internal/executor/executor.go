@@ -56,6 +56,10 @@ func (e *Executor) executeSQLScript(ctx context.Context, scriptName string) (str
 		return "", err
 	}
 
+	if e.cfg.DebugMode {
+		logger.Debug("Loaded script content:\n%s\n", scriptContent)
+	}
+
 	// Find all variables (&var or &&var)
 	variables := e.findVariables(scriptContent)
 
@@ -111,44 +115,49 @@ func (e *Executor) executeSQLViaSSHUpload(ctx context.Context, scriptContent, sc
 		execCmd = e.cfg.SourceCmd + " && " + execCmd
 	}
 
+	if e.cfg.DebugMode {
+		logger.Debug("Executing SQL script via SSH: %s\n", execCmd)
+	}
+
 	output, err := sshConn.ExecuteCommand(ctx, execCmd)
 	return output, err
 }
 
-// executeSQLDirect executes SQL directly via connector
+// executeSQLDirect executes SQL directly via local yasql with temp file
 func (e *Executor) executeSQLDirect(ctx context.Context, scriptContent string) (string, error) {
-	// Split script into statements
-	statements := e.splitSQLStatements(scriptContent)
+	// Create temporary script file
+	tmpFile := fmt.Sprintf("/tmp/ytop_%d.sql", os.Getpid())
 
-	var output strings.Builder
-
-	for _, stmt := range statements {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-
-		// Skip SQL*Plus commands
-		if e.isSQLPlusCommand(stmt) {
-			continue
-		}
-
-		// Execute statement
-		rows, err := e.conn.ExecuteQuery(ctx, stmt)
-		if err != nil {
-			fmt.Fprintf(&output, "Error: %v\n", err)
-			continue
-		}
-
-		// Format output
-		for _, row := range rows {
-			output.WriteString(strings.Join(row, " | "))
-			output.WriteString("\n")
-		}
-		output.WriteString("\n")
+	// Write script content to temp file
+	if err := os.WriteFile(tmpFile, []byte(scriptContent), 0644); err != nil {
+		return "", fmt.Errorf("failed to write temp script: %w", err)
 	}
 
-	return output.String(), nil
+	// Ensure cleanup
+	defer func() {
+		if !e.cfg.DebugMode {
+			os.Remove(tmpFile)
+		}
+	}()
+
+	// Build yasql command with @file
+	args := []string{"-S"}
+	if e.cfg.ConnectString != "" {
+		args = append(args, e.cfg.ConnectString)
+	}
+	args = append(args, "@"+tmpFile)
+
+	if e.cfg.DebugMode {
+		logger.Debug("Executing SQL script locally: %s %v\n", e.cfg.YasqlPath, args)
+	}
+
+	cmd := exec.CommandContext(ctx, e.cfg.YasqlPath, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(output), fmt.Errorf("yasql execution failed: %w", err)
+	}
+
+	return string(output), nil
 }
 
 // executeOSCommand executes an OS command or script

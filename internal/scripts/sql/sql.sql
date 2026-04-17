@@ -11,90 +11,127 @@ prompt *************************************************************************
 prompt LITERAL SQL
 prompt ****************************************************************************************
 
-
 DECLARE
-  LVC_SQL_TEXT      VARCHAR2(32000);
-  LVC_ORIG_SQL_TEXT VARCHAR2(32000);
-  LN_CHILD          NUMBER := 10000;
-  LVC_BIND          VARCHAR2(200);
-  LVC_NAME          VARCHAR2(30);
-  LN_BIND_COUNT     NUMBER := 0;
-  CURSOR C1 IS
-    SELECT CHILD_NUMBER, NAME, POSITION, DATATYPE_STRING, VALUE_STRING
-      -- add
-      ,sql_id
-      -- add end
-      FROM V$SQL_BIND_CAPTURE
-     WHERE SQL_ID = '&&sqlid'
-     ORDER BY CHILD_NUMBER, POSITION;
-BEGIN
+  c_sqlid           CONSTANT VARCHAR2(64) := '&&sqlid';
 
-  SELECT SQL_FULLTEXT
-    INTO LVC_ORIG_SQL_TEXT
-    FROM V$SQL
-   WHERE SQL_ID = '&&sqlid'
+  lvc_sql_text      VARCHAR2(32000);
+  lvc_orig_sql_text VARCHAR2(32000);
+  ln_child          NUMBER := 10000;
+  lvc_repl          VARCHAR2(2000);
+  lvc_name          VARCHAR2(30);
+
+  ln_bind_count     NUMBER := 0;
+  ln_sql_cnt        NUMBER := 0;
+  ln_qpos           NUMBER;
+
+  CURSOR c1 IS
+    SELECT child_number,
+           name,
+           position,
+           datatype_string,
+           value_string,
+           sql_id
+      FROM v$sql_bind_capture
+     WHERE sql_id = c_sqlid
+     ORDER BY child_number, position;
+BEGIN
+  SELECT COUNT(*)
+    INTO ln_sql_cnt
+    FROM v$sql
+   WHERE sql_id = c_sqlid;
+
+  IF ln_sql_cnt = 0 THEN
+    DBMS_OUTPUT.PUT_LINE('No SQL found in V$SQL for sql_id=' || c_sqlid);
+    RETURN;
+  END IF;
+
+  SELECT sql_fulltext
+    INTO lvc_orig_sql_text
+    FROM v$sql
+   WHERE sql_id = c_sqlid
      AND ROWNUM = 1;
 
   SELECT parsing_schema_name
-    INTO LVC_NAME
+    INTO lvc_name
     FROM v$sql
-   WHERE sql_id = '&&sqlid'
+   WHERE sql_id = c_sqlid
      AND ROWNUM = 1;
 
 
-  SELECT COUNT(*)
-    INTO LN_BIND_COUNT
-    FROM V$SQL_BIND_CAPTURE
-   WHERE SQL_ID = '&&sqlid' and ROWNUM=1;
-
-
-  IF LN_BIND_COUNT = 0 THEN
-    DBMS_OUTPUT.PUT_LINE('Schema: ' || LVC_NAME);
-    DBMS_OUTPUT.PUT_LINE(LVC_ORIG_SQL_TEXT);
+  IF REGEXP_LIKE(lvc_orig_sql_text, '^\s*(UPDATE|DELETE)\b', 'i') THEN
+    DBMS_OUTPUT.PUT_LINE('Schema: ' || lvc_name);
+    DBMS_OUTPUT.PUT_LINE(lvc_orig_sql_text);
     DBMS_OUTPUT.PUT_LINE('--------------------------------------------------------');
     RETURN;
   END IF;
 
+  SELECT COUNT(*)
+    INTO ln_bind_count
+    FROM v$sql_bind_capture
+   WHERE sql_id = c_sqlid;
 
-  FOR R1 IN C1 LOOP
-    IF (R1.CHILD_NUMBER <> LN_CHILD) THEN
-      IF LN_CHILD <> 10000 THEN
-        DBMS_OUTPUT.PUT_LINE(LVC_NAME);
-        DBMS_OUTPUT.PUT_LINE(LVC_SQL_TEXT);
+  IF ln_bind_count = 0 THEN
+    DBMS_OUTPUT.PUT_LINE('Schema: ' || lvc_name);
+    DBMS_OUTPUT.PUT_LINE(lvc_orig_sql_text);
+    DBMS_OUTPUT.PUT_LINE('--------------------------------------------------------');
+    RETURN;
+  END IF;
+
+  FOR r1 IN c1 LOOP
+    IF (r1.child_number <> ln_child) THEN
+      IF ln_child <> 10000 THEN
+        DBMS_OUTPUT.PUT_LINE(lvc_name);
+        DBMS_OUTPUT.PUT_LINE(lvc_sql_text);
         DBMS_OUTPUT.PUT_LINE('--------------------------------------------------------');
       END IF;
-      LN_CHILD     := R1.CHILD_NUMBER;
-      LVC_SQL_TEXT := LVC_ORIG_SQL_TEXT;
+
+      ln_child     := r1.child_number;
+      lvc_sql_text := lvc_orig_sql_text;
     END IF;
 
-    -- add
-    select parsing_schema_name into LVC_NAME from v$sql where sql_id=r1.sql_id and child_number=r1.CHILD_NUMBER;
-    -- add end
+    BEGIN
+      SELECT parsing_schema_name
+        INTO lvc_name
+        FROM v$sql
+       WHERE sql_id = r1.sql_id
+         AND child_number = r1.child_number;
+    EXCEPTION
+      WHEN OTHERS THEN NULL;
+    END;
 
-    IF R1.NAME LIKE ':SYS_B_%' THEN
-      LVC_BIND := ':"'||substr(R1.NAME,2)||'"';
+    IF r1.value_string IS NULL THEN
+      lvc_repl := 'NULL';
+    ELSIF r1.datatype_string = 'NUMBER' THEN
+      lvc_repl := r1.value_string;
+    ELSIF r1.datatype_string = 'DATE' THEN
+      lvc_repl := 'to_date(''' || r1.value_string || ''')';
+    ELSIF r1.datatype_string LIKE 'TIMESTAMP%' THEN
+      lvc_repl := 'to_timestamp(''' || r1.value_string || ''')';
     ELSE
-      LVC_BIND := R1.NAME;
+      lvc_repl := '''' || REPLACE(r1.value_string, '''', '''''') || '''';
     END IF;
 
-    IF r1.VALUE_STRING IS NOT NULL THEN
-      IF R1.DATATYPE_STRING = 'NUMBER' THEN
-        LVC_SQL_TEXT := REGEXP_REPLACE(LVC_SQL_TEXT, LVC_BIND, R1.VALUE_STRING,1,1,'i');
-      ELSIF R1.DATATYPE_STRING LIKE 'VARCHAR%' THEN
-        LVC_SQL_TEXT := REGEXP_REPLACE(LVC_SQL_TEXT, LVC_BIND, ''''||R1.VALUE_STRING||'''',1,1,'i');
-      ELSE
-        LVC_SQL_TEXT := REGEXP_REPLACE(LVC_SQL_TEXT, LVC_BIND, ''''||R1.VALUE_STRING||'''',1,1,'i');
-      END IF;
-    ELSE
-       LVC_SQL_TEXT := REGEXP_REPLACE(LVC_SQL_TEXT, LVC_BIND, 'NULL',1,1,'i');
+    ln_qpos := INSTR(lvc_sql_text, '?');
+    IF ln_qpos = 0 THEN
+      DBMS_OUTPUT.PUT_LINE(
+        'ERROR: no remaining ''?'' placeholders while replacing binds. ' ||
+        'bind position=' || r1.position
+      );
+      RETURN;
     END IF;
+
+    lvc_sql_text :=
+      SUBSTR(lvc_sql_text, 1, ln_qpos - 1) ||
+      lvc_repl ||
+      SUBSTR(lvc_sql_text, ln_qpos + 1);
   END LOOP;
 
-
-  DBMS_OUTPUT.PUT_LINE(LVC_NAME);
-  DBMS_OUTPUT.PUT_LINE(LVC_SQL_TEXT);
+  DBMS_OUTPUT.PUT_LINE(lvc_name);
+  DBMS_OUTPUT.PUT_LINE(lvc_sql_text);
 END;
 /
+
+
 
 prompt ****************************************************************************************
 prompt PLAN from v$ash_plan

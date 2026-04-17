@@ -53,6 +53,9 @@ type Config struct {
 	ReadScript     string // -r: read/view script content
 	CopyScript     string // -c: copy script (format: "script dest")
 	FindScript     string // -S: find/search scripts
+
+	// Metric mode (delta/per-second calculation)
+	MetricMode bool // --metric: enable metric collection with delta calculation
 }
 
 // DefaultConfig returns a config with default values
@@ -121,8 +124,8 @@ func LoadConfig() (*Config, error) {
 	sshKeyFileShort := flag.String("k", "", "SSH private key file (short)")
 	sourceCmd := flag.String("source", "", "Source command to run before yasql")
 	sourceCmdShort := flag.String("s", "", "Source command (short)")
-	interval := flag.Int("i", 0, "Refresh interval in seconds")
-	count := flag.Int("c", 0, "Number of iterations (0 = infinite)")
+	// Interval and count are now handled via positional arguments only
+	// Removed -i and -c flags for simplicity
 	outputFile := flag.String("o", "", "Output file path")
 	sessionTopN := flag.Int("session-top", 0, "Number of sessions to show in TOP N")
 	sessionSortBy := flag.String("session-sort", "", "Session sort column")
@@ -137,6 +140,8 @@ func LoadConfig() (*Config, error) {
 	readScript := flag.String("r", "", "Read/view script content (non-interactive mode)")
 	copyScript := flag.String("copy", "", "Copy script to destination (format: 'script dest', non-interactive mode)")
 	findScript := flag.String("S", "", "Find/search scripts by pattern (non-interactive mode)")
+	metricMode := flag.Bool("m", false, "Enable metric mode with delta/per-second calculation (use with -f)")
+	metricModeLong := flag.Bool("metric", false, "Enable metric mode with delta/per-second calculation (use with -f)")
 
 	flag.Parse()
 
@@ -235,6 +240,9 @@ func LoadConfig() (*Config, error) {
 	if *findScript != "" {
 		cfg.FindScript = *findScript
 	}
+	if *metricMode || *metricModeLong {
+		cfg.MetricMode = true
+	}
 
 	// Auto-detect connection mode based on SSH host
 	// If user explicitly set mode, use that; otherwise auto-detect
@@ -249,42 +257,44 @@ func LoadConfig() (*Config, error) {
 	// Handle positional arguments (interval [count])
 	args := flag.Args()
 
-	// Check if in direct execution mode
+	// Check if in direct execution mode (excluding metric mode)
 	isDirectMode := cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
 		cfg.CopyScript != "" || cfg.FindScript != ""
 
-	// Handle interval: command line flag > positional arg > direct mode default (0) > config/default (5)
+	// Metric mode uses same defaults as monitor mode
+	isMetricMode := cfg.MetricMode
+
+	// Handle interval and count from positional arguments
+	// Positional args: [interval] [count]
+	// - Monitor mode: ytop [interval] [count]
+	// - Direct mode: ytop -f xxx [interval] [count]
+	// - Metric mode: ytop -f xxx -m [interval] [count]
+
 	intervalSpecified := false
-	if *interval > 0 {
-		cfg.Interval = *interval
-		intervalSpecified = true
-	} else if len(args) >= 1 {
+	countSpecified := false
+
+	if len(args) >= 1 {
 		if i, err := strconv.Atoi(args[0]); err == nil && i >= 0 {
 			cfg.Interval = i
 			intervalSpecified = true
 		}
 	}
 
-	// In direct execution mode, if interval not explicitly specified, set to 0
-	if isDirectMode && !intervalSpecified {
-		cfg.Interval = 0
-	}
-
-	// Handle count: command line flag > positional arg > direct mode default (1) > config/default (5)
-	countSpecified := false
-	if *count >= 0 {
-		cfg.Count = *count
-		countSpecified = true
-	} else if len(args) >= 2 {
+	if len(args) >= 2 {
 		if c, err := strconv.Atoi(args[1]); err == nil && c >= 0 {
 			cfg.Count = c
 			countSpecified = true
 		}
 	}
 
-	// In direct execution mode, if count not explicitly specified, set to 1 (execute once)
-	if isDirectMode && !countSpecified {
-		cfg.Count = 1
+	// In direct execution mode (non-metric), if interval/count not specified, use single execution defaults
+	if isDirectMode && !isMetricMode {
+		if !intervalSpecified {
+			cfg.Interval = 0
+		}
+		if !countSpecified {
+			cfg.Count = 1
+		}
 	}
 
 	// Validate configuration
@@ -450,8 +460,8 @@ func PrintUsage() {
 	fmt.Println("  -p, --password <pass> SSH password")
 	fmt.Println("  -k, --key <file>      SSH private key file")
 	fmt.Println("  -s, --source <cmd>    Source command to run before yasql")
-	fmt.Println("  -i, --interval <sec>  Interval in seconds (default: 5 for monitor, 0 for direct execution)")
-	fmt.Println("  -c, --count <num>     Number of samples/iterations (default: 5 for monitor, 1 for direct execution)")
+	fmt.Println("  [interval] [count]     Positional args for interval and count")
+	fmt.Println("                        Default: 5 5 for monitor/metric mode, 0 1 for direct execution")
 	fmt.Println("  -t, --top <num>       Number of top results to show (default: 5)")
 	fmt.Println("  -o, --output <file>   Output file path")
 	fmt.Println("  -I, --inst <id>       Instance ID (0 = all instances, default: 0)")
@@ -463,6 +473,10 @@ func PrintUsage() {
 	fmt.Println("  -r <script>           Read/view script content without entering monitor UI")
 	fmt.Println("  --copy <script dest>  Copy script to destination (e.g., 'we.sql /tmp')")
 	fmt.Println("  -S <pattern>           Find/search scripts by pattern (supports regex)")
+	fmt.Println("  -m, --metric          Enable metric mode with delta/per-second calculation (use with -f)")
+	fmt.Println("\nMetric Mode Examples:")
+	fmt.Println("  ytop -f gv_vm.sql -m 1 10               # Collect metrics every 1s, 10 times")
+	fmt.Println("  ytop -f gv_vm.sql -m 2                  # Collect metrics every 2s, continuous")
 	fmt.Println("\nMonitor Mode Examples:")
 	fmt.Println("  ytop                                    # Default: 5 second interval, 5 iterations")
 	fmt.Println("  ytop 2                                  # 2 second interval, 5 iterations")
@@ -472,10 +486,10 @@ func PrintUsage() {
 	fmt.Println("  ytop -h 10.10.10.130 -u yashan -p oracle -s \"source ~/.bashrc\"")
 	fmt.Println("\nDirect Execution Examples:")
 	fmt.Println("  ytop -f we.sql                          # Execute we.sql once")
-	fmt.Println("  ytop -f we.sql -i 5 -c 10               # Execute we.sql every 5 seconds, 10 times")
+	fmt.Println("  ytop -f we.sql 5 10                     # Execute we.sql every 5 seconds, 10 times")
 	fmt.Println("  ytop -f /path/to/script.sql             # Execute script from full path")
 	fmt.Println("  ytop -q \"select * from v$version\"       # Execute SQL query once")
-	fmt.Println("  ytop -q \"select count(*) from v$session\" -i 2 -c 5  # Execute query every 2 seconds, 5 times")
+	fmt.Println("  ytop -q \"select count(*) from v$session\" 2 5  # Execute query every 2 seconds, 5 times")
 	fmt.Println("  ytop -h 10.10.10.130 -f iostat.sh       # Execute OS script on remote server")
 	fmt.Println("  ytop -r we.sql                          # Read/view we.sql content")
 	fmt.Println("  ytop --copy 'we.sql /tmp'               # Copy we.sql to /tmp")

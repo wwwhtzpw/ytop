@@ -65,6 +65,38 @@ func (c *LocalConnector) ExecuteQuery(ctx context.Context, sql string) ([][]stri
 	return parseYasqlOutput(string(output))
 }
 
+// ExecuteQueryWithHeader executes a SQL query and returns header + data rows
+func (c *LocalConnector) ExecuteQueryWithHeader(ctx context.Context, sql string) (header []string, rows [][]string, err error) {
+	if !c.connected {
+		return nil, nil, fmt.Errorf("not connected")
+	}
+
+	// Prepare yasql command with -S flag for silent mode and -c for SQL execution
+	args := []string{"-S"}
+
+	// Add connection string
+	if c.cfg.ConnectString != "" {
+		args = append(args, c.cfg.ConnectString)
+	}
+
+	// Add -c flag with SQL command
+	args = append(args, "-c", sql)
+
+	cmd := exec.CommandContext(ctx, c.cfg.YasqlPath, args...)
+
+	if c.cfg.DebugMode {
+		logger.Debug("Executing SQL:\n%s\n", sql)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, nil, fmt.Errorf("yasql execution failed: %w, output: %s", err, string(output))
+	}
+
+	// Parse output with header
+	return ParseYasqlOutputWithHeader(string(output))
+}
+
 // Close closes the connection
 func (c *LocalConnector) Close() error {
 	c.connected = false
