@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -162,18 +164,28 @@ func (e *Executor) executeSQLDirect(ctx context.Context, scriptContent string) (
 
 // executeOSCommand executes an OS command or script
 func (e *Executor) executeOSCommand(ctx context.Context, input string) (string, error) {
-	// Check if it's an embedded OS script
-	if !strings.Contains(input, " ") {
-		// Might be a script name
-		scriptContent, err := scripts.GetOSScript(input)
+	fields := strings.Fields(input)
+	if len(fields) == 1 {
+		scriptName := fields[0]
+		scriptContent, err := scripts.GetOSScript(scriptName)
 		if err == nil {
-			// Execute embedded script
-			return e.executeOSScript(ctx, scriptContent)
+			return e.executeOSScript(ctx, scriptContent, nil)
 		}
 		// Input looks like a script name (e.g. db_size.sl) but script not found:
 		// do not run as shell command to avoid SSH and confusing "command not found"
-		if strings.Contains(input, ".") {
-			return "", fmt.Errorf("script not found: %s", input)
+		if strings.Contains(scriptName, ".") {
+			return "", fmt.Errorf("script not found: %s", scriptName)
+		}
+	} else if len(fields) >= 2 {
+		// "script.sh arg1 arg2" — first token may be an embedded/path OS script; pass args via bash -s
+		scriptName := fields[0]
+		scriptContent, err := scripts.GetOSScript(scriptName)
+		if err == nil {
+			return e.executeOSScript(ctx, scriptContent, fields[1:])
+		}
+		// Looks like a script filename but not in script library
+		if looksLikeOSScriptFilename(scriptName) {
+			return "", fmt.Errorf("script not found: %s", scriptName)
 		}
 	}
 
@@ -183,6 +195,24 @@ func (e *Executor) executeOSCommand(ctx context.Context, input string) (string, 
 	}
 
 	return e.executeOSCommandLocal(ctx, input)
+}
+
+func looksLikeOSScriptFilename(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".sh", ".bash", ".zsh", ".ksh":
+		return true
+	default:
+		return false
+	}
+}
+
+func randomHeredocMarker(prefix string) string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return fmt.Sprintf("%s_%s", prefix, hex.EncodeToString(b[:]))
+	}
+	return fmt.Sprintf("%s_%d", prefix, os.Getpid())
 }
 
 // executeOSCommandViaSSH executes OS command via SSH with real-time output
@@ -324,12 +354,31 @@ func (e *Executor) executeOSCommandLocal(ctx context.Context, command string) (s
 	return outputBuffer.String(), nil
 }
 
-// executeOSScript executes an OS script
-func (e *Executor) executeOSScript(ctx context.Context, scriptContent string) (string, error) {
-	if e.cfg.ConnectionMode == "ssh" {
-		return e.executeOSCommandViaSSH(ctx, scriptContent)
+// executeOSScript executes an OS script (optional args passed to the script as positional parameters)
+func (e *Executor) executeOSScript(ctx context.Context, scriptContent string, args []string) (string, error) {
+	if len(args) == 0 {
+		if e.cfg.ConnectionMode == "ssh" {
+			return e.executeOSCommandViaSSH(ctx, scriptContent)
+		}
+		return e.executeOSCommandLocal(ctx, scriptContent)
 	}
-	return e.executeOSCommandLocal(ctx, scriptContent)
+
+	delim := randomHeredocMarker("YTOP_OS_EOF")
+	var escapedArgs strings.Builder
+	for _, a := range args {
+		if escapedArgs.Len() > 0 {
+			escapedArgs.WriteByte(' ')
+		}
+		escapedArgs.WriteString(utils.ShellEscape(a))
+	}
+
+	cmd := fmt.Sprintf("bash -s -- %s <<'%s'\n%s\n%s",
+		escapedArgs.String(), delim, scriptContent, delim)
+
+	if e.cfg.ConnectionMode == "ssh" {
+		return e.executeOSCommandViaSSH(ctx, cmd)
+	}
+	return e.executeOSCommandLocal(ctx, cmd)
 }
 
 // ExecuteAdHocSQL executes a single SQL statement directly
