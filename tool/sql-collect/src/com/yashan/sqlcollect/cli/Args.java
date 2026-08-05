@@ -209,7 +209,8 @@ public class Args {
                 || "current-schema".equals(k) || "source".equals(k)
                 || "parallel".equals(k) || "sessions".equals(k) || "results-csv".equals(k)
                 || "on-sha-mismatch".equals(k) || "limit".equals(k) || "sort".equals(k)
-                || "run".equals(k) || "csv".equals(k) || "sqlid".equals(k);
+                || "run".equals(k) || "csv".equals(k) || "sqlid".equals(k)
+                || "sink".equals(k);
     }
 
     static boolean isBoolToken(String tok) {
