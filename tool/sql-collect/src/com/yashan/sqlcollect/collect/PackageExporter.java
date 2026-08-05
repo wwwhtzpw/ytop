@@ -1,8 +1,9 @@
 package com.yashan.sqlcollect.collect;
 
+import com.yashan.sqlcollect.db.CursorSnapshot;
 import com.yashan.sqlcollect.db.HtzTables;
 import com.yashan.sqlcollect.db.JdbcSession;
-import com.yashan.sqlcollect.db.SqlLookup;
+import com.yashan.sqlcollect.db.SqlDataSource;
 import com.yashan.sqlcollect.log.DualLogger;
 import com.yashan.sqlcollect.model.BindValue;
 import com.yashan.sqlcollect.model.ReplayPackageMeta;
@@ -21,8 +22,23 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 导出 replay 包并 upsert 登录用户下的 HTZ_SQL_REPLAY_PKG.
+ * 导出 replay 包并/或 upsert 登录用户下的 HTZ_SQL_REPLAY_PKG.
+ * 游标与 bind 一律经 {@link SqlDataSource} (live 或 HTZ), 不在本类直查 gv$/v$sql*.
  * HTZ 表操作失败直接抛错, 由 collect 退出.
+ *
+ * <p>Task 6 sink 矩阵 (本类只暴露开关; 由 CollectCommand 传入):
+ * <pre>
+ * sink | -X (skip-replay-export) | writeHtzPkg | writeFiles
+ * -----|-------------------------|------------|-----------
+ * file | no                      | false      | true
+ * file | yes                     | false      | false
+ * table| —                       | true       | false
+ * both | no                      | true       | true
+ * both | yes                     | false      | false
+ * </pre>
+ * 即: file 永远 writeHtzPkg=false, writeFiles=!skipX;
+ * table 永远 writeHtzPkg=true, writeFiles=false;
+ * both: writeHtzPkg=!skipX, writeFiles=!skipX.
  */
 public class PackageExporter {
 
@@ -37,31 +53,51 @@ public class PackageExporter {
     }
 
     /**
-     * 导出 replay 包并 upsert HTZ.
-     * @return 包目录路径; sql 不在 v$/gv$sql 时返回 null
+     * 按开关导出 replay 目录文件与/或 upsert HTZ_SQL_REPLAY_PKG.
+     *
+     * @param src          游标/bind 数据源 (live 或 HTZ)
+     * @param writeFiles   false 时不写 replay/ 目录
+     * @param writeHtzPkg  false 时不碰 HTZ_SQL_REPLAY_PKG
+     * @return 包目录路径 (即使未落盘也会返回约定路径); sql 不在 src 时返回 null;
+     *         writeFiles 与 writeHtzPkg 均为 false 时返回 null
      */
-    public Path export(JdbcSession session, String sqlId, Path outdir, String kind) throws SQLException {
-        log.logStep("replay_export", sqlId + " kind=" + kind + " owner=" + owner);
-        Row row = loadLatestRow(session.getConnection(), sqlId);
-        if (row == null) {
-            log.logWarn("replay export: sql_id not in v$/gv$sql: " + sqlId);
+    public Path export(JdbcSession session, String sqlId, Path outdir, String kind,
+                       SqlDataSource src, boolean writeFiles, boolean writeHtzPkg)
+            throws SQLException {
+        if (!writeFiles && !writeHtzPkg) {
+            log.logDbg("replay export skipped (writeFiles=false writeHtzPkg=false) sql_id=" + sqlId);
             return null;
         }
-        Path pkg;
-        try {
-            pkg = writeFiles(outdir, row);
-        } catch (IOException e) {
-            log.logError("write replay package failed for " + sqlId + ": " + e.getMessage());
-            throw new SQLException("write replay package failed for " + sqlId, e);
+        if (src == null) {
+            throw new SQLException("SqlDataSource is null for export sql_id=" + sqlId);
         }
-        ensureReplayTable(session.getConnection());
-        ensureSqlSha256Column(session.getConnection());
-        upsertHtz(session.getConnection(), row);
+        log.logStep("replay_export", sqlId + " kind=" + kind + " owner=" + owner
+                + " writeFiles=" + writeFiles + " writeHtzPkg=" + writeHtzPkg);
+        Row row = loadFromSource(session.getConnection(), sqlId, src);
+        if (row == null) {
+            log.logWarn("replay export: sql_id not found in data source: " + sqlId);
+            return null;
+        }
+        Path pkg = packagePath(outdir, row);
+        if (writeFiles) {
+            try {
+                pkg = writeFiles(outdir, row);
+            } catch (IOException e) {
+                log.logError("write replay package failed for " + sqlId + ": " + e.getMessage());
+                throw new SQLException("write replay package failed for " + sqlId, e);
+            }
+        }
+        if (writeHtzPkg) {
+            ensureReplayTable(session.getConnection());
+            ensureSqlSha256Column(session.getConnection());
+            upsertHtz(session.getConnection(), row);
+        }
 
         String tag = "REFRESH".equalsIgnoreCase(kind) ? "refresh" : "new";
-        log.logDbg(String.format("%s export sql_id=%s child=%d inst_id=%d len=%d binds=%d -> %s",
+        log.logDbg(String.format("%s export sql_id=%s child=%d inst_id=%d len=%d binds=%d -> %s"
+                        + " (files=%s htz=%s)",
                 tag, sqlId, row.meta.childNumber, row.meta.instId, row.meta.sqlLen, row.binds.size(),
-                pkg));
+                pkg, Boolean.toString(writeFiles), Boolean.toString(writeHtzPkg)));
         int empty = 0;
         for (BindValue b : row.binds) {
             if (b.value == null || b.value.isEmpty() || "\\N".equals(b.value)) {
@@ -82,132 +118,34 @@ public class PackageExporter {
         List<BindValue> binds = new ArrayList<BindValue>();
     }
 
-    private Row loadLatestRow(Connection c, String sqlId) throws SQLException {
-        // 1) 先从 bind_capture (gv$+v$) 选 filled 最大的 child, 再取该 child 的 sql 文本
-        SqlLookup.CapturedChild prefer = SqlLookup.pickBestCapturedChild(c, sqlId);
-        Row row = null;
-        if (prefer != null) {
-            row = loadRowByChild(c, sqlId, prefer.childNumber, prefer.instId);
-            if (row != null) {
-                row.binds = loadBindsPreferFilled(c, sqlId, row.meta.childNumber, row.meta.instId);
-                int filled = countFilled(row.binds);
-                log.logInfo("export cursor sql_id=" + sqlId + " child=" + row.meta.childNumber
-                        + " inst_id=" + row.meta.instId + " binds=" + row.binds.size()
-                        + " filled=" + filled + " pick=bind_capture:" + prefer.source
-                        + "(child=" + prefer.childNumber + " filled=" + prefer.filled + ")");
-                return row;
-            }
-            log.logWarn("export pick capture child=" + prefer.childNumber
-                    + " but sql text missing in gv$/v$sql; fallback last_active");
-        }
-
-        // 2) 回退: gv$/v$sql + GREATEST(gv$,v$ capture) 排序
-        String[] queries = new String[] {
-            "SELECT child_number, parsing_schema_name, NVL(inst_id,1), hash_value, "
-                    + "DBMS_LOB.GETLENGTH(sql_fulltext), sql_fulltext "
-                    + "FROM (SELECT s.child_number, s.parsing_schema_name, s.inst_id, s.hash_value, "
-                    + "s.sql_fulltext, s.last_active_time, s.executions FROM gv$sql s WHERE s.sql_id = ? "
-                    + "ORDER BY " + SqlLookup.ORDER_GV_PREFER_CAPTURED + ") "
-                    + "WHERE ROWNUM = 1",
-            "SELECT child_number, parsing_schema_name, 1, hash_value, "
-                    + "DBMS_LOB.GETLENGTH(sql_fulltext), sql_fulltext "
-                    + "FROM (SELECT s.child_number, s.parsing_schema_name, s.hash_value, "
-                    + "s.sql_fulltext, s.last_active_time, s.executions FROM v$sql s WHERE s.sql_id = ? "
-                    + "ORDER BY " + SqlLookup.ORDER_V_PREFER_CAPTURED + ") "
-                    + "WHERE ROWNUM = 1"
-        };
-        for (String q : queries) {
-            log.logDbg("jdbc sql [export_load]: " + q);
-            try (PreparedStatement ps = c.prepareStatement(q)) {
-                ps.setString(1, sqlId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        row = new Row();
-                        row.meta.sqlId = sqlId;
-                        row.meta.childNumber = rs.getInt(1);
-                        row.meta.parsingSchema = rs.getString(2);
-                        row.meta.instId = rs.getInt(3);
-                        row.meta.hashValue = rs.getLong(4);
-                        row.meta.sqlLen = rs.getInt(5);
-                        row.sqlText = JdbcSession.readClob(rs.getClob(6));
-                    }
-                }
-                if (row != null) {
-                    break;
-                }
-            } catch (SQLException e) {
-                log.logDbg("export load sql from alternate view: " + e.getMessage());
-            }
-        }
-        if (row == null) {
+    /** 经 SqlDataSource 取游标与 bind, 不再直查 gv$/v$. */
+    private Row loadFromSource(Connection c, String sqlId, SqlDataSource src) throws SQLException {
+        CursorSnapshot snap = src.pickCursor(c, sqlId);
+        if (snap == null || snap.sqlText == null || snap.sqlText.isEmpty()) {
             return null;
         }
-        row.binds = loadBindsPreferFilled(c, sqlId, row.meta.childNumber, row.meta.instId);
+        Row row = new Row();
+        row.meta.sqlId = sqlId;
+        row.meta.childNumber = snap.childNumber;
+        row.meta.parsingSchema = snap.schema == null ? "" : snap.schema;
+        row.meta.instId = snap.instId <= 0 ? 1 : snap.instId;
+        row.meta.hashValue = snap.hashValue;
+        row.meta.sqlLen = snap.sqlLen > 0 ? snap.sqlLen : snap.sqlText.length();
+        row.sqlText = snap.sqlText;
+        row.binds = src.loadBinds(c, sqlId, row.meta.childNumber, row.meta.instId);
+        if (row.binds == null) {
+            row.binds = new ArrayList<BindValue>();
+        }
         int filled = countFilled(row.binds);
         log.logInfo("export cursor sql_id=" + sqlId + " child=" + row.meta.childNumber
                 + " inst_id=" + row.meta.instId + " binds=" + row.binds.size()
-                + " filled=" + filled + " pick=sql_order");
+                + " filled=" + filled + " pick=datasource:" + src.getClass().getSimpleName());
         return row;
     }
 
-    private Row loadRowByChild(Connection c, String sqlId, int child, int instId) throws SQLException {
-        String[] queries = new String[] {
-            "SELECT child_number, parsing_schema_name, NVL(inst_id,1), hash_value, "
-                    + "DBMS_LOB.GETLENGTH(sql_fulltext), sql_fulltext FROM gv$sql "
-                    + "WHERE sql_id = ? AND child_number = ? AND NVL(inst_id,1) = ? AND ROWNUM = 1",
-            "SELECT child_number, parsing_schema_name, 1, hash_value, "
-                    + "DBMS_LOB.GETLENGTH(sql_fulltext), sql_fulltext FROM v$sql "
-                    + "WHERE sql_id = ? AND child_number = ? AND ROWNUM = 1"
-        };
-        for (int qi = 0; qi < queries.length; qi++) {
-            try (PreparedStatement ps = c.prepareStatement(queries[qi])) {
-                ps.setString(1, sqlId);
-                ps.setInt(2, child);
-                if (qi == 0) {
-                    ps.setInt(3, instId);
-                }
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        continue;
-                    }
-                    Row row = new Row();
-                    row.meta.sqlId = sqlId;
-                    row.meta.childNumber = rs.getInt(1);
-                    row.meta.parsingSchema = rs.getString(2);
-                    row.meta.instId = rs.getInt(3);
-                    row.meta.hashValue = rs.getLong(4);
-                    row.meta.sqlLen = rs.getInt(5);
-                    row.sqlText = JdbcSession.readClob(rs.getClob(6));
-                    return row;
-                }
-            } catch (SQLException e) {
-                log.logDbg("export load by child alternate: " + e.getMessage());
-            }
-        }
-        // inst_id 对不上时放宽: 只按 child
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT child_number, parsing_schema_name, NVL(inst_id,1), hash_value, "
-                        + "DBMS_LOB.GETLENGTH(sql_fulltext), sql_fulltext FROM gv$sql "
-                        + "WHERE sql_id = ? AND child_number = ? AND ROWNUM = 1")) {
-            ps.setString(1, sqlId);
-            ps.setInt(2, child);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    Row row = new Row();
-                    row.meta.sqlId = sqlId;
-                    row.meta.childNumber = rs.getInt(1);
-                    row.meta.parsingSchema = rs.getString(2);
-                    row.meta.instId = rs.getInt(3);
-                    row.meta.hashValue = rs.getLong(4);
-                    row.meta.sqlLen = rs.getInt(5);
-                    row.sqlText = JdbcSession.readClob(rs.getClob(6));
-                    return row;
-                }
-            }
-        } catch (SQLException e) {
-            log.logDbg("export load by child gv$ loose: " + e.getMessage());
-        }
-        return null;
+    private static Path packagePath(Path outdir, Row row) {
+        return outdir.resolve(REPLAY_DIR).resolve(
+                row.meta.sqlId + "__c" + row.meta.childNumber + "__i" + row.meta.instId);
     }
 
     private static int countFilled(List<BindValue> binds) {
@@ -221,20 +159,6 @@ public class PackageExporter {
             }
         }
         return filled;
-    }
-
-    /** gv$/v$/HTZ 备份表都查, 选 filled 最多的一侧 (SqlLookup 统一实现). */
-    private List<BindValue> loadBindsPreferFilled(Connection c, String sqlId, int child, int instId)
-            throws SQLException {
-        return SqlLookup.loadBinds(c, sqlId, child, instId, new SqlLookup.WarnOut() {
-            public void warn(String msg) {
-                log.logDbg("export binds: " + msg);
-            }
-        });
-    }
-
-    private List<BindValue> loadBinds(Connection c, String sqlId, int child, int instId) throws SQLException {
-        return loadBindsPreferFilled(c, sqlId, child, instId);
     }
 
     private void ensureReplayTable(Connection c) throws SQLException {
@@ -359,8 +283,7 @@ public class PackageExporter {
     }
 
     private Path writeFiles(Path outdir, Row row) throws IOException {
-        Path pkg = outdir.resolve(REPLAY_DIR).resolve(
-                row.meta.sqlId + "__c" + row.meta.childNumber + "__i" + row.meta.instId);
+        Path pkg = packagePath(outdir, row);
         Files.createDirectories(pkg);
         String sha = ReplayPackageMeta.sha256Utf8(row.sqlText);
         row.meta.sqlSha256 = sha;
@@ -397,9 +320,5 @@ public class PackageExporter {
         log.logDbg("sql_sha256=" + sha + " sql_id=" + row.meta.sqlId);
         log.logDbg("wrote package files " + pkg);
         return pkg;
-    }
-
-    private static String nvl(String s) {
-        return s == null ? "" : s;
     }
 }

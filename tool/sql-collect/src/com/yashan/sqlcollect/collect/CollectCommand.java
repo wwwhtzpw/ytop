@@ -4,6 +4,7 @@ import com.yashan.sqlcollect.cli.Args;
 import com.yashan.sqlcollect.config.JdbcConfig;
 import com.yashan.sqlcollect.db.JdbcPool;
 import com.yashan.sqlcollect.db.JdbcSession;
+import com.yashan.sqlcollect.db.LiveSqlSource;
 import com.yashan.sqlcollect.log.DualLogger;
 import com.yashan.sqlcollect.model.SqlCandidate;
 
@@ -314,7 +315,9 @@ public class CollectCommand {
                 }
                 log.logStep("bind_refresh", item.sqlId);
                 try {
-                    Path pkg = exporter.export(session, item.sqlId, outdir, "REFRESH");
+                    // Task 5: 临时 Live + 双写; Task 6 按 sink 矩阵传 writeFiles/writeHtzPkg
+                    Path pkg = exporter.export(session, item.sqlId, outdir, "REFRESH",
+                            LiveSqlSource.INSTANCE, true, true);
                     if (pkg != null) {
                         log.logInfo("refresh export sql_id=" + item.sqlId
                                 + " " + PackageExporter.REPLAY_DIR + "/" + pkg.getFileName());
@@ -364,7 +367,9 @@ public class CollectCommand {
             }
             Path outFile = writeOkReport(outdir, sqlId, report);
             if (!skipReplayExport) {
-                Path pkg = exporter.export(session, sqlId, outdir, "NEW");
+                // Task 5: 临时 Live + 双写; Task 6 按 sink 矩阵传 writeFiles/writeHtzPkg
+                Path pkg = exporter.export(session, sqlId, outdir, "NEW",
+                        LiveSqlSource.INSTANCE, true, true);
                 if (pkg == null) {
                     log.logWarn("report OK but replay export failed for " + sqlId
                             + "; not marked collected (will retry next round)");
@@ -396,7 +401,9 @@ public class CollectCommand {
         log.logInfo("force sql_id=" + sqlId);
         log.logStep("collect_force", sqlId);
         if (!skipReplayExport) {
-            Path pkg = exporter.export(session, sqlId, outdir, "NEW");
+            // Task 5: 临时 Live + 双写; Task 6 按 sink 矩阵传 writeFiles/writeHtzPkg
+            Path pkg = exporter.export(session, sqlId, outdir, "NEW",
+                    LiveSqlSource.INSTANCE, true, true);
             if (pkg == null) {
                 log.logWarn("force replay export failed for " + sqlId);
                 return false;
