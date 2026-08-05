@@ -1,7 +1,10 @@
 /Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/VersionTest.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/cli/ArgsTest.java
+/Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/collect/CandidateServiceHtzSqlTest.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/collect/LiteralBindRewriteTest.java
+/Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/collect/SinkModeTest.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/collect/SqlReportRunnerRewriteTest.java
+/Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/db/HtzSqlSourceSqlTest.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/model/ReplayPackageMetaTest.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/replay/ReplayEngineClassifyTest.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/test/com/yashan/sqlcollect/sqlmap/SqlMapArgsTest.java
