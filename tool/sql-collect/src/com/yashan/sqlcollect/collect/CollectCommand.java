@@ -2,9 +2,11 @@ package com.yashan.sqlcollect.collect;
 
 import com.yashan.sqlcollect.cli.Args;
 import com.yashan.sqlcollect.config.JdbcConfig;
+import com.yashan.sqlcollect.db.HtzSqlSource;
 import com.yashan.sqlcollect.db.JdbcPool;
 import com.yashan.sqlcollect.db.JdbcSession;
 import com.yashan.sqlcollect.db.LiveSqlSource;
+import com.yashan.sqlcollect.db.SqlDataSource;
 import com.yashan.sqlcollect.log.DualLogger;
 import com.yashan.sqlcollect.model.SqlCandidate;
 
@@ -51,6 +53,15 @@ public class CollectCommand {
     }
 
     private int runBody(Args args, DualLogger log) {
+        SinkMode sink;
+        try {
+            sink = SinkMode.resolve(args);
+        } catch (IllegalArgumentException e) {
+            log.logError(e.getMessage());
+            return 2;
+        }
+        boolean skipX = args.flag("skip-replay-export");
+
         Integer interval = args.optInt("interval", null);
         Integer count = args.optInt("count", null);
         if (interval != null && interval < 1) {
@@ -59,10 +70,6 @@ public class CollectCommand {
         }
         if (count != null && count < 1) {
             log.logError("--count must be >= 1");
-            return 2;
-        }
-        if (args.flag("skip-backup") && args.flag("backup-only")) {
-            log.logError("--skip-backup and --backup-only are mutually exclusive");
             return 2;
         }
 
@@ -86,8 +93,10 @@ public class CollectCommand {
                     com.yashan.sqlcollect.util.RunDirResolver.resolve(baseOut, args.flag("new-run"));
             outdir = rr.runDir;
             Files.createDirectories(outdir);
-            Files.createDirectories(outdir.resolve(REPORT_DIR));
-            Files.createDirectories(outdir.resolve(SKIPPED_DIR));
+            if (sink != SinkMode.TABLE) {
+                Files.createDirectories(outdir.resolve(REPORT_DIR));
+                Files.createDirectories(outdir.resolve(SKIPPED_DIR));
+            }
             log.logInfo("outdir_base=" + rr.baseOutdir);
             log.logInfo("run_dir=" + outdir + " mode=" + rr.mode
                     + (rr.created ? " (created)" : ""));
@@ -113,6 +122,11 @@ public class CollectCommand {
             cfg.currentSchema = cs;
         }
 
+        final SqlDataSource src = (sink == SinkMode.FILE)
+                ? LiveSqlSource.INSTANCE
+                : new HtzSqlSource(cfg.user);
+        String sourceTag = (sink == SinkMode.FILE) ? "live" : "htz";
+
         int[] loop = resolveLoop(interval, count);
         Integer rounds = loop[0] == -1 ? null : loop[0];
         int sleepSec = loop[1];
@@ -120,15 +134,21 @@ public class CollectCommand {
         log.logInfo("sql-collect v" + com.yashan.sqlcollect.Version.VERSION + " collect");
         log.logInfo("jdbc_config=" + cfg.configPath);
         log.logInfo("jdbc_url=" + cfg.jdbcUrl);
+        log.logInfo("sink=" + sink.name().toLowerCase() + " source=" + sourceTag);
         boolean explainPlan = args.flag("explain-plan");
-        log.logInfo("report=jdbc-native (ORIGINAL+LITERAL+PLAN/objects+AWR P2)");
+        log.logInfo("report=jdbc-native (ORIGINAL+LITERAL+PLAN/objects+AWR P2)"
+                + (sink == SinkMode.TABLE ? " (table sink: package only, no reports)" : ""));
         log.logInfo("explain_plan=" + explainPlan
                 + (explainPlan ? " (SELECT/WITH CTE only; EXPLAIN PLAN FOR, no exec)" : " (default off)"));
-        log.logInfo("reports_dir=" + outdir.resolve(REPORT_DIR));
-        log.logInfo("skipped_dir=" + outdir.resolve(SKIPPED_DIR));
-        log.logInfo("backup=" + (args.flag("backup-only") ? "only"
-                : (args.flag("skip-backup") ? "off" : "on(B object-dedupe)")));
-        log.logInfo("replay_export=" + (args.flag("skip-replay-export") ? "off" : "on"));
+        if (sink != SinkMode.TABLE) {
+            log.logInfo("reports_dir=" + outdir.resolve(REPORT_DIR));
+            log.logInfo("skipped_dir=" + outdir.resolve(SKIPPED_DIR));
+        }
+        log.logInfo("backup=" + (sink == SinkMode.FILE ? "off"
+                : (sink == SinkMode.TABLE ? "on+package" : "on(B object-dedupe)")));
+        log.logInfo("replay_export=" + (skipX ? "off" : "on")
+                + " writeHtzPkg=" + writeHtzPkg(sink, skipX)
+                + " writeFiles=" + writeFiles(sink, skipX));
         log.logInfo("schema_via_alter=" + cfg.schemaViaAlter);
         if (cfg.currentSchema != null && !cfg.currentSchema.isEmpty()) {
             log.logInfo("current_schema=" + cfg.currentSchema);
@@ -154,8 +174,10 @@ public class CollectCommand {
             }
             reportWriter.setReportTimeoutSec(reportTimeout.intValue());
         }
-        log.logInfo("report_timeout_sec=" + reportWriter.getReportTimeoutSec()
-                + (reportWriter.getReportTimeoutSec() <= 0 ? " (unlimited)" : ""));
+        if (sink != SinkMode.TABLE) {
+            log.logInfo("report_timeout_sec=" + reportWriter.getReportTimeoutSec()
+                    + (reportWriter.getReportTimeoutSec() <= 0 ? " (unlimited)" : ""));
+        }
         PackageExporter exporter = new PackageExporter(log, cfg.user);
         BindRefresh bindRefresh = new BindRefresh();
         JdbcPool pool = new JdbcPool(log, JdbcPool.DEFAULT_MAX_IDLE_PER_USER);
@@ -167,7 +189,8 @@ public class CollectCommand {
             while (true) {
                 roundI++;
                 log.logStep("collect_round", String.valueOf(roundI));
-                int failN = runRound(args, log, cfg, outdir, collectedPath,
+                log.logInfo("sink=" + sink.name().toLowerCase() + " source=" + sourceTag);
+                int failN = runRound(args, log, cfg, outdir, collectedPath, sink, skipX, src,
                         backupSvc, candSvc, reportWriter, exporter, bindRefresh, pool);
                 if (failN < 0) {
                     log.logError("collect aborted due to HTZ/JDBC fatal error");
@@ -197,13 +220,34 @@ public class CollectCommand {
         return 0;
     }
 
+    /** sink 矩阵: 是否写 HTZ_SQL_REPLAY_PKG. */
+    static boolean writeHtzPkg(SinkMode sink, boolean skipX) {
+        if (sink == SinkMode.FILE) {
+            return false;
+        }
+        if (sink == SinkMode.TABLE) {
+            return true;
+        }
+        return !skipX;
+    }
+
+    /** sink 矩阵: 是否写 replay/ 文件. */
+    static boolean writeFiles(SinkMode sink, boolean skipX) {
+        if (sink == SinkMode.TABLE) {
+            return false;
+        }
+        return !skipX;
+    }
+
     /** @return fail count, or negative to abort whole collect */
     private int runRound(Args args, DualLogger log, JdbcConfig cfg, Path outdir, Path collectedPath,
+                         SinkMode sink, boolean skipX, SqlDataSource src,
                          BackupService backupSvc, CandidateService candSvc, ReportWriter reportWriter,
                          PackageExporter exporter, BindRefresh bindRefresh, JdbcPool pool) {
         int failN = 0;
         List<String> backupNew = new ArrayList<String>();
         boolean backupOk = true;
+        boolean useHtz = sink != SinkMode.FILE;
         try (JdbcSession session = openSession(cfg, log, pool)) {
             session.getConnection().setAutoCommit(false);
             try {
@@ -213,30 +257,24 @@ public class CollectCommand {
             } catch (SQLException e) {
                 log.logDbg("jdbc session user lookup failed: " + e.getMessage());
             }
-            if (!args.flag("skip-backup")) {
+
+            // FILE: 完全跳过 BackupService; TABLE|BOTH: 增量备份 HTZ_GV_*
+            if (sink != SinkMode.FILE) {
                 try {
                     BackupService.Result br = backupSvc.run(session);
                     backupNew = br.newSqlIds;
                 } catch (SQLException e) {
-                    // 对齐 Python: backup 失败 WARN 后继续报告采集 (backup-only 则失败退出)
+                    // WARN 后继续候选; table 本轮计失败 (backupOk → failN++)
                     backupOk = false;
-                    log.logWarn("backup step failed; continue report collect: " + e.getMessage());
+                    log.logWarn("backup step failed; continue collect: " + e.getMessage());
                     try {
                         session.getConnection().rollback();
                     } catch (SQLException ignored) {
                     }
-                    if (args.flag("backup-only")) {
-                        log.logError("backup-only failed");
-                        return 1;
+                    if (sink == SinkMode.TABLE) {
+                        log.logError("table sink backup failed; round will count as failed");
                     }
                 }
-            }
-            if (args.flag("backup-only")) {
-                for (String sid : backupNew) {
-                    log.logDbg("backup-new sql_id=" + sid);
-                }
-                log.logInfo("backup-only done backup_new=" + backupNew.size());
-                return backupOk ? 0 : 1;
             }
 
             // --sql-id / -s: 手动定向采集 (只处理给定 sql_id, 不扫候选池)
@@ -247,7 +285,7 @@ public class CollectCommand {
                 for (String sid : forceIds) {
                     try {
                         if (!collectForced(session, log, reportWriter, exporter, outdir, collectedPath,
-                                sid, args.flag("skip-replay-export"))) {
+                                sid, sink, skipX, src)) {
                             failN++;
                         }
                     } catch (SQLException e) {
@@ -267,7 +305,7 @@ public class CollectCommand {
             }
 
             Set<String> collected = loadCollected(collectedPath);
-            List<SqlCandidate> items = candSvc.list(session);
+            List<SqlCandidate> items = candSvc.list(session, sink, backupNew);
             List<SqlCandidate> newItems = new ArrayList<SqlCandidate>();
             for (SqlCandidate c : items) {
                 if (!collected.contains(c.sqlId)) {
@@ -275,9 +313,12 @@ public class CollectCommand {
                 }
             }
             List<SqlCandidate> refreshItems = new ArrayList<SqlCandidate>();
-            if (!args.flag("skip-replay-export")) {
+            // TABLE 必刷包表; FILE|BOTH 在未 -X 时刷文件/包
+            boolean doRefresh = (sink == SinkMode.TABLE) || !skipX;
+            if (doRefresh) {
                 for (SqlCandidate c : items) {
-                    if (collected.contains(c.sqlId) && bindRefresh.needsRefresh(outdir, c.sqlId)) {
+                    if (collected.contains(c.sqlId)
+                            && bindRefresh.needsRefresh(session, outdir, c.sqlId, useHtz, cfg.user)) {
                         refreshItems.add(c);
                     }
                 }
@@ -288,10 +329,14 @@ public class CollectCommand {
 
             for (SqlCandidate item : newItems) {
                 try {
-                    if (collectOne(session, log, reportWriter, exporter, outdir, collectedPath,
-                            item, args.flag("skip-replay-export"))) {
-                        // ok
+                    boolean ok;
+                    if (sink == SinkMode.TABLE) {
+                        ok = collectTableOnly(session, log, exporter, outdir, collectedPath, item, src);
                     } else {
+                        ok = collectOne(session, log, reportWriter, exporter, outdir, collectedPath,
+                                item, sink, skipX, src);
+                    }
+                    if (!ok) {
                         failN++;
                     }
                 } catch (SQLException e) {
@@ -306,7 +351,7 @@ public class CollectCommand {
             }
             for (SqlCandidate item : refreshItems) {
                 try {
-                    if (!bindRefresh.shouldReExport(session, outdir, item.sqlId)) {
+                    if (!bindRefresh.shouldReExport(session, outdir, item.sqlId, src, cfg.user)) {
                         log.logDbg("refresh skip sql_id=" + item.sqlId);
                         continue;
                     }
@@ -315,12 +360,17 @@ public class CollectCommand {
                 }
                 log.logStep("bind_refresh", item.sqlId);
                 try {
-                    // Task 5: 临时 Live + 双写; Task 6 按 sink 矩阵传 writeFiles/writeHtzPkg
+                    boolean wFiles = writeFiles(sink, skipX);
+                    boolean wHtz = writeHtzPkg(sink, skipX);
                     Path pkg = exporter.export(session, item.sqlId, outdir, "REFRESH",
-                            LiveSqlSource.INSTANCE, true, true);
+                            src, wFiles, wHtz);
                     if (pkg != null) {
-                        log.logInfo("refresh export sql_id=" + item.sqlId
-                                + " " + PackageExporter.REPLAY_DIR + "/" + pkg.getFileName());
+                        if (wFiles) {
+                            log.logInfo("refresh export sql_id=" + item.sqlId
+                                    + " " + PackageExporter.REPLAY_DIR + "/" + pkg.getFileName());
+                        } else {
+                            log.logInfo("refresh htz-pkg sql_id=" + item.sqlId);
+                        }
                     } else {
                         failN++;
                         log.logWarn("refresh export failed for " + item.sqlId);
@@ -343,18 +393,64 @@ public class CollectCommand {
         return failN;
     }
 
+    /**
+     * sink=table: 只 upsert HTZ_SQL_REPLAY_PKG, 不写报告/文件包.
+     * 成功 → appendCollected.
+     */
+    private boolean collectTableOnly(JdbcSession session, DualLogger log, PackageExporter exporter,
+                                     Path outdir, Path collectedPath, SqlCandidate item,
+                                     SqlDataSource src) throws SQLException {
+        String sqlId = item.sqlId;
+        log.logInfo("new sql_id=" + sqlId + " schema=" + item.schema + " len=" + item.sqlLen
+                + " sink=table");
+        log.logStep("collect_table", sqlId);
+        try {
+            Path pkg = exporter.export(session, sqlId, outdir, "NEW", src, false, true);
+            if (pkg == null) {
+                log.logWarn("htz package upsert failed for " + sqlId + "; not marked collected");
+                return false;
+            }
+            log.logInfo("new done htz-pkg sql_id=" + sqlId);
+            appendCollected(collectedPath, sqlId);
+            return true;
+        } catch (SQLException e) {
+            throw e;
+        } catch (Exception e) {
+            log.logWarn("collect_table failed " + sqlId + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * sink=file|both: 写报告; 按矩阵导出文件/包表.
+     * Task 7 将切换报告 HTZ 段; 本期仍用 JdbcReportBuilder, 存在性优先 src.exists.
+     */
     private boolean collectOne(JdbcSession session, DualLogger log, ReportWriter reportWriter,
                                PackageExporter exporter, Path outdir, Path collectedPath,
-                               SqlCandidate item, boolean skipReplayExport) throws SQLException {
+                               SqlCandidate item, SinkMode sink, boolean skipX,
+                               SqlDataSource src) throws SQLException {
         String sqlId = item.sqlId;
         log.logInfo("new sql_id=" + sqlId + " schema=" + item.schema + " len=" + item.sqlLen);
         log.logStep("collect_one", sqlId);
+        boolean wFiles = writeFiles(sink, skipX);
+        boolean wHtz = writeHtzPkg(sink, skipX);
         try {
-            if (!reportWriter.sqlIdPresentForReport(session, sqlId)) {
+            boolean present;
+            if (sink == SinkMode.FILE) {
+                present = reportWriter.sqlIdPresentForReport(session, sqlId);
+            } else {
+                // BOTH: HTZ 事实源; Task 7 完整报告段切换
+                present = src.exists(session.getConnection(), sqlId);
+            }
+            if (!present) {
                 log.logInfo("skip report sql_id=" + sqlId
-                        + " (not in gv$sql/v$sql or gv$sqlstats/v$sqlstats)");
+                        + (sink == SinkMode.FILE
+                        ? " (not in gv$sql/v$sql or gv$sqlstats/v$sqlstats)"
+                        : " (not in HTZ_GV_SQL)"));
                 Path stub = writeSkippedReport(outdir, sqlId, ReportWriter.skippedStub(sqlId,
-                        "(not in gv$sql/gv$sqlstats)"));
+                        sink == SinkMode.FILE
+                                ? "(not in gv$sql/gv$sqlstats)"
+                                : "(not in HTZ_GV_SQL)"));
                 log.logDbg("skip stub=" + stub);
                 return true;
             }
@@ -366,19 +462,23 @@ public class CollectCommand {
                 return false;
             }
             Path outFile = writeOkReport(outdir, sqlId, report);
-            if (!skipReplayExport) {
-                // Task 5: 临时 Live + 双写; Task 6 按 sink 矩阵传 writeFiles/writeHtzPkg
-                Path pkg = exporter.export(session, sqlId, outdir, "NEW",
-                        LiveSqlSource.INSTANCE, true, true);
+            if (wFiles || wHtz) {
+                Path pkg = exporter.export(session, sqlId, outdir, "NEW", src, wFiles, wHtz);
                 if (pkg == null) {
-                    log.logWarn("report OK but replay export failed for " + sqlId
+                    log.logWarn("report OK but export failed for " + sqlId
                             + "; not marked collected (will retry next round)");
                     return false;
                 }
-                log.logInfo("new done and export sql_id=" + sqlId
-                        + " report=" + displayPath(outFile)
-                        + " and " + PackageExporter.REPLAY_DIR + "/" + pkg.getFileName());
+                if (wFiles) {
+                    log.logInfo("new done and export sql_id=" + sqlId
+                            + " report=" + displayPath(outFile)
+                            + " and " + PackageExporter.REPLAY_DIR + "/" + pkg.getFileName());
+                } else {
+                    log.logInfo("new done sql_id=" + sqlId + " report=" + displayPath(outFile)
+                            + " htz-pkg=ok");
+                }
             } else {
+                // both -X: 仅报告即可 collected
                 log.logInfo("new done sql_id=" + sqlId + " report=" + displayPath(outFile));
             }
             appendCollected(collectedPath, sqlId);
@@ -392,48 +492,114 @@ public class CollectCommand {
     }
 
     /**
-     * 定向 sql_id: 先导出 replay 包/HTZ (对齐 Python plant→export ASAP),
-     * 再尽力写报告; 报告不完整不影响导出成功.
+     * 定向 sql_id force (-s), 按 sink §5.4:
+     * FILE: 先文件包再报告; TABLE: 只 upsert 包表 (不在 HTZ → 失败, 无 v$ 回落);
+     * BOTH: 先包表, 再报告+文件包.
      */
     private boolean collectForced(JdbcSession session, DualLogger log, ReportWriter reportWriter,
                                   PackageExporter exporter, Path outdir, Path collectedPath,
-                                  String sqlId, boolean skipReplayExport) throws SQLException {
-        log.logInfo("force sql_id=" + sqlId);
+                                  String sqlId, SinkMode sink, boolean skipX,
+                                  SqlDataSource src) throws SQLException {
+        log.logInfo("force sql_id=" + sqlId + " sink=" + sink.name().toLowerCase());
         log.logStep("collect_force", sqlId);
-        if (!skipReplayExport) {
-            // Task 5: 临时 Live + 双写; Task 6 按 sink 矩阵传 writeFiles/writeHtzPkg
-            Path pkg = exporter.export(session, sqlId, outdir, "NEW",
-                    LiveSqlSource.INSTANCE, true, true);
+
+        if (sink == SinkMode.TABLE) {
+            Path pkg = exporter.export(session, sqlId, outdir, "NEW", src, false, true);
+            if (pkg == null) {
+                log.logWarn("force htz-pkg failed for " + sqlId
+                        + " (sql_id not in HTZ or upsert failed; no v$ fallback)");
+                return false;
+            }
+            log.logInfo("force done htz-pkg sql_id=" + sqlId);
+            try {
+                appendCollected(collectedPath, sqlId);
+            } catch (IOException e) {
+                log.logWarn("append collected failed " + sqlId + ": " + e.getMessage());
+            }
+            return true;
+        }
+
+        if (sink == SinkMode.BOTH) {
+            // 先包表 (未 -X); -X 时跳过包表, 仅报告
+            if (writeHtzPkg(sink, skipX)) {
+                Path pkgTable = exporter.export(session, sqlId, outdir, "NEW", src, false, true);
+                if (pkgTable == null) {
+                    log.logWarn("force htz-pkg failed for " + sqlId + "; abort force");
+                    return false;
+                }
+                log.logDbg("force htz-pkg ok sql_id=" + sqlId);
+            }
+            return forceReportAndFiles(session, log, reportWriter, exporter, outdir, collectedPath,
+                    sqlId, sink, skipX, src, true);
+        }
+
+        // FILE: 先文件包再报告
+        boolean wFiles = writeFiles(sink, skipX);
+        if (wFiles) {
+            Path pkg = exporter.export(session, sqlId, outdir, "NEW", src, true, false);
             if (pkg == null) {
                 log.logWarn("force replay export failed for " + sqlId);
                 return false;
             }
             log.logDbg("force export pkg=" + pkg);
         }
+        return forceReportAndFiles(session, log, reportWriter, exporter, outdir, collectedPath,
+                sqlId, sink, skipX, src, false);
+    }
+
+    /**
+     * force 路径的报告 (+ BOTH 时补写文件包).
+     * @param bothPkgDone BOTH 已写包表; 若需文件则再 export writeFiles
+     */
+    private boolean forceReportAndFiles(JdbcSession session, DualLogger log, ReportWriter reportWriter,
+                                        PackageExporter exporter, Path outdir, Path collectedPath,
+                                        String sqlId, SinkMode sink, boolean skipX,
+                                        SqlDataSource src, boolean bothPkgDone) throws SQLException {
         boolean reportOk = false;
         try {
-            if (!reportWriter.sqlIdPresentForReport(session, sqlId)) {
+            boolean present;
+            if (sink == SinkMode.FILE) {
+                present = reportWriter.sqlIdPresentForReport(session, sqlId);
+            } else {
+                present = src.exists(session.getConnection(), sqlId);
+            }
+            if (!present) {
                 log.logInfo("skip report sql_id=" + sqlId
-                        + " (not in gv$sql/v$sql or gv$sqlstats/v$sqlstats; export kept)");
+                        + (bothPkgDone ? " (export kept)" : ""));
                 Path stub = writeSkippedReport(outdir, sqlId, ReportWriter.skippedStub(sqlId,
-                        "(not in gv$sql/gv$sqlstats; export kept)"));
+                        bothPkgDone ? "(not present; export kept)" : "(not present)"));
                 log.logDbg("skip stub=" + stub);
+                // BOTH 包表已成功: 仍可 collected? 设计 force both: 报告失败→保留包表, skipped
+                // append 条件 both: 报告有效且包表成功... → 报告失败不 append
                 return true;
             }
             String report = reportWriter.buildReport(session, sqlId);
             reportOk = reportWriter.isValidReport(report);
             if (reportOk) {
                 Path outFile = writeOkReport(outdir, sqlId, report);
-                if (!skipReplayExport) {
-                    log.logInfo("force done and export sql_id=" + sqlId
-                            + " report=" + displayPath(outFile));
+                if (bothPkgDone && writeFiles(sink, skipX)) {
+                    Path pkgFiles = exporter.export(session, sqlId, outdir, "NEW", src, true, false);
+                    if (pkgFiles == null) {
+                        log.logWarn("force report OK but file export failed for " + sqlId
+                                + "; not marked collected");
+                        reportOk = false;
+                    } else {
+                        log.logInfo("force done and export sql_id=" + sqlId
+                                + " report=" + displayPath(outFile)
+                                + " and " + PackageExporter.REPLAY_DIR + "/" + pkgFiles.getFileName());
+                    }
+                } else if (bothPkgDone) {
+                    log.logInfo("force done sql_id=" + sqlId + " report=" + displayPath(outFile)
+                            + " htz-pkg=ok");
                 } else {
                     log.logInfo("force done sql_id=" + sqlId + " report=" + displayPath(outFile));
                 }
             } else {
                 Path stub = writeSkippedReport(outdir, sqlId, report);
                 log.logWarn("report incomplete for " + sqlId
-                        + "; keep under skipped/ (export already done) path=" + stub);
+                        + "; keep under skipped/"
+                        + (bothPkgDone ? " (htz-pkg kept)" : " (export already done)")
+                        + " path=" + stub);
             }
         } catch (Exception e) {
             log.logWarn("force report failed " + sqlId + ": " + e.getMessage());

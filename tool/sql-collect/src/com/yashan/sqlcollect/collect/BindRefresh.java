@@ -23,18 +23,26 @@ import java.util.List;
 
 /**
  * 绑定刷新判定: 空包绑定 + capture 有更多非空值 => 重导出.
- * HTZ 路径 (HtzSqlSource / useHtz=true) 的 filled 计数查 HTZ_GV_SQL_BIND_CAPTURE,
- * 不查 gv$/v$sql_bind_capture.
+ * HTZ 路径 (HtzSqlSource / useHtz=true): filled 计数查 HTZ_GV_SQL_BIND_CAPTURE;
+ * 包侧统计优先 replay/ 文件, 无文件时读 HTZ_SQL_REPLAY_PKG.BINDS_JSON.
  */
 public class BindRefresh {
 
+    /** 仅文件包路径: 无 replay/ 包则视为需要刷新. */
     public boolean needsRefresh(Path outdir, String sqlId) {
-        List<Path> pkgs = listPackages(outdir, sqlId);
-        if (pkgs.isEmpty()) {
-            return true;
-        }
-        int[] stats = packageBindStats(pkgs.get(0));
+        return needsRefresh(null, outdir, sqlId, false, null);
+    }
+
+    /**
+     * @param session  useHtz 时用于读包表; FILE 路径可 null
+     * @param useHtz   true 时无文件包则回落 HTZ_SQL_REPLAY_PKG
+     * @param jdbcUser HTZ 表所属登录用户; useHtz 时必填
+     */
+    public boolean needsRefresh(JdbcSession session, Path outdir, String sqlId,
+                                boolean useHtz, String jdbcUser) {
+        int[] stats = packageSideBindStats(session, outdir, sqlId, useHtz, jdbcUser);
         if (stats == null) {
+            // 无文件包且 (非 HTZ 或包表无行) → 需要刷新/首次导出
             return true;
         }
         int nBinds = stats[0];
@@ -61,16 +69,12 @@ public class BindRefresh {
     }
 
     /**
-     * @param useHtz   true 时从 HTZ_GV_SQL_BIND_CAPTURE 计 filled
+     * @param useHtz   true 时从 HTZ_GV_SQL_BIND_CAPTURE 计 filled; 包侧可回落包表
      * @param jdbcUser HTZ 路径下表所属登录用户; useHtz=false 时可 null
      */
     public boolean shouldReExport(JdbcSession session, Path outdir, String sqlId,
                                   boolean useHtz, String jdbcUser) throws SQLException {
-        List<Path> pkgs = listPackages(outdir, sqlId);
-        if (pkgs.isEmpty()) {
-            return true;
-        }
-        int[] stats = packageBindStats(pkgs.get(0));
+        int[] stats = packageSideBindStats(session, outdir, sqlId, useHtz, jdbcUser);
         if (stats == null) {
             return true;
         }
@@ -85,6 +89,22 @@ public class BindRefresh {
             return true;
         }
         return capFilled > pkgFilled;
+    }
+
+    /**
+     * 包侧绑定统计: 优先 replay/ 文件; 无文件且 useHtz 时读 HTZ_SQL_REPLAY_PKG.
+     * @return [nBinds, nEmpty]; 两侧皆无则 null
+     */
+    private int[] packageSideBindStats(JdbcSession session, Path outdir, String sqlId,
+                                       boolean useHtz, String jdbcUser) {
+        List<Path> pkgs = listPackages(outdir, sqlId);
+        if (!pkgs.isEmpty()) {
+            return packageBindStats(pkgs.get(0));
+        }
+        if (useHtz && session != null) {
+            return htzPkgBindStats(session.getConnection(), jdbcUser, sqlId);
+        }
+        return null;
     }
 
     public List<Path> listPackages(Path outdir, String sqlId) {
@@ -128,14 +148,7 @@ public class BindRefresh {
         if (Files.isRegularFile(bj)) {
             try {
                 String raw = new String(Files.readAllBytes(bj), StandardCharsets.UTF_8);
-                List<BindValue> binds = JsonBinds.read(raw);
-                int empty = 0;
-                for (BindValue b : binds) {
-                    if (isEmptyValue(b.value)) {
-                        empty++;
-                    }
-                }
-                return new int[] {binds.size(), empty};
+                return bindStatsFromJson(raw);
             } catch (IOException e) {
                 return null;
             }
@@ -166,6 +179,41 @@ public class BindRefresh {
         } catch (IOException e) {
             return null;
         }
+    }
+
+    /** 从 HTZ_SQL_REPLAY_PKG 取该 sql_id 一行 BINDS_JSON 统计; 无行返回 null. */
+    private int[] htzPkgBindStats(Connection c, String jdbcUser, String sqlId) {
+        if (c == null || jdbcUser == null || jdbcUser.trim().isEmpty()
+                || sqlId == null || sqlId.isEmpty()) {
+            return null;
+        }
+        String owner = HtzTables.normalizeOwner(jdbcUser);
+        String qn = HtzTables.qname(owner, HtzTables.REPLAY_PKG);
+        String sql = "SELECT binds_json FROM " + qn
+                + " WHERE sql_id = ? ORDER BY child_number, inst_id";
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, sqlId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                String json = rs.getString(1);
+                return bindStatsFromJson(json);
+            }
+        } catch (SQLException e) {
+            return null;
+        }
+    }
+
+    private static int[] bindStatsFromJson(String raw) {
+        List<BindValue> binds = JsonBinds.read(raw == null ? "" : raw);
+        int empty = 0;
+        for (BindValue b : binds) {
+            if (isEmptyValue(b.value)) {
+                empty++;
+            }
+        }
+        return new int[] {binds.size(), empty};
     }
 
     private Integer captureFilledCount(Connection c, String sqlId) {

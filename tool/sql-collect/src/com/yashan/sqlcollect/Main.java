@@ -89,9 +89,15 @@ public class Main {
         Args.helpOpt("-w, --overwrite", "With -I/--init-config, replace existing file");
         Args.helpOpt("-i, --interval <sec>", "Poll interval seconds");
         Args.helpOpt("-c, --count <n>", "Number of collect rounds");
-        Args.helpOpt("-K, --skip-backup", "Skip HTZ_GV_* backup");
-        Args.helpOpt("-B, --backup-only", "Backup only; no reports / replay export");
-        Args.helpOpt("-X, --skip-replay-export", "Skip replay package export");
+        Args.helpOpt("--sink <mode>", "Collect sink: table | file | both (default: both)");
+        Args.helpOpt("", "table=HTZ_GV_*+HTZ_SQL_REPLAY_PKG (no reports/replay files)");
+        Args.helpOpt("", "file=reports(+replay); no HTZ writes; read gv$/v$");
+        Args.helpOpt("", "both=HTZ backup+package+reports(+replay); read HTZ");
+        Args.helpOpt("-K, --skip-backup", "Alias for --sink file (mutually exclusive with -B)");
+        Args.helpOpt("-B, --backup-only", "Alias for --sink table (HTZ backup + package table;");
+        Args.helpOpt("", "no reports/replay files; upgraded from backup-only)");
+        Args.helpOpt("-X, --skip-replay-export", "Skip replay files/package (file: reports only;");
+        Args.helpOpt("", "both: HTZ_GV_*+reports, no replay/package; error with table)");
         Args.helpOpt("-s, --sql-id <id[,id...]>", "Collect ONLY these sql_id(s) (manual one-shot;");
         Args.helpOpt("", "skips candidate scan; comma-separated OK)");
         Args.helpOpt("-T, --report-timeout <sec>", "Report gather timeout (default: 600; 0=unlimited)");
@@ -144,6 +150,8 @@ public class Main {
         System.out.println("Examples:");
         System.out.println("  sql-collect check -j jdbc_replay.ini");
         System.out.println("  sql-collect collect -j jdbc_replay.ini -o ./sql_collect -c 1 -n");
+        System.out.println("  sql-collect collect --sink file -j jdbc_replay.ini -o ./sql_collect -c 1 -n");
+        System.out.println("  sql-collect collect --sink table -j jdbc_replay.ini -o ./sql_collect -c 1");
         System.out.println("  sql-collect collect -s <sql_id> -j jdbc_replay.ini -o ./sql_collect -n");
         System.out.println("  sql-collect collect -s <sql_id> -K -j jdbc_replay.ini -o ./sql_collect -n");
         System.out.println("  sql-collect collect -s <sql_id> -E -K -n -j jdbc_replay.ini -o ./sql_collect");
