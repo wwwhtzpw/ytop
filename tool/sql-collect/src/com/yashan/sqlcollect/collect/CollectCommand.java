@@ -163,6 +163,7 @@ public class CollectCommand {
         CandidateService candSvc = new CandidateService(log);
         ReportWriter reportWriter = new ReportWriter(log);
         reportWriter.setExplainPlan(explainPlan);
+        reportWriter.setReportDataSource(src, sink != SinkMode.FILE, cfg.user);
         Integer reportTimeout = args.optInt("report-timeout", null);
         if (reportTimeout == null) {
             reportTimeout = args.optInt("timeout", null);

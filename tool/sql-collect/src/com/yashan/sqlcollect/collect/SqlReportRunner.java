@@ -1,5 +1,6 @@
 package com.yashan.sqlcollect.collect;
 
+import com.yashan.sqlcollect.db.HtzTables;
 import com.yashan.sqlcollect.db.JdbcSession;
 import com.yashan.sqlcollect.log.DualLogger;
 
@@ -16,6 +17,7 @@ import java.util.List;
  * JDBC 执行报告 SELECT 段 ({@link ReportSelectScript}: PLAN / sqlarea / AWR / objects).
  * ORIGINAL/LITERAL 由 {@link JdbcReportBuilder} 纯 Java 写出.
  * sql_id 一律 JDBC ? 绑定, 避免字面量替换撑爆 share pool.
+ * HTZ 模式: PLAN/sqlarea/v$sql 改写为 HTZ_GV_*; AWR/dba_* 不改写.
  */
 public class SqlReportRunner {
 
@@ -23,6 +25,80 @@ public class SqlReportRunner {
 
     public SqlReportRunner(DualLogger log) {
         this.log = log;
+    }
+
+    /**
+     * 将报告 SELECT 中的 v$/gv$ 计划与统计视图改为登录用户 HTZ 表.
+     * 先替换长名 (sql_plan/sqlarea/sqlstats), 再替换 v$sql/gv$sql.
+     * 不改写 AWR/WRH$/dba_* (模板中通常不含上述需替换名).
+     */
+    static String rewriteViewsForHtz(String sql, String owner) {
+        if (sql == null || sql.isEmpty()) {
+            return sql == null ? "" : sql;
+        }
+        String o = HtzTables.normalizeOwner(owner);
+        String plan = HtzTables.qname(o, HtzTables.GV_SQL_PLAN);
+        String stats = HtzTables.qname(o, HtzTables.GV_SQLSTATS);
+        String sqlTbl = HtzTables.qname(o, HtzTables.GV_SQL);
+        String s = sql;
+        s = replaceIgnoreCaseToken(s, "gv$sql_plan", plan);
+        s = replaceIgnoreCaseToken(s, "v$sql_plan", plan);
+        s = replaceIgnoreCaseToken(s, "gv$sqlarea", stats);
+        s = replaceIgnoreCaseToken(s, "v$sqlarea", stats);
+        s = replaceIgnoreCaseToken(s, "gv$sqlstats", stats);
+        s = replaceIgnoreCaseToken(s, "v$sqlstats", stats);
+        s = replaceIgnoreCaseToken(s, "gv$sql", sqlTbl);
+        s = replaceIgnoreCaseToken(s, "v$sql", sqlTbl);
+        return s;
+    }
+
+    /** PROMPT 展示: 标明 PLAN 来自 HTZ. */
+    static String rewritePromptForHtzDisplay(String prompt) {
+        if (prompt == null || prompt.isEmpty()) {
+            return prompt == null ? "" : prompt;
+        }
+        String s = prompt;
+        s = replaceIgnoreCaseToken(s, "v$sql_plan", "HTZ_GV_SQL_PLAN");
+        s = replaceIgnoreCaseToken(s, "gv$sql_plan", "HTZ_GV_SQL_PLAN");
+        s = replaceIgnoreCaseToken(s, "v$sqlarea", "HTZ_GV_SQLSTATS");
+        s = replaceIgnoreCaseToken(s, "gv$sqlarea", "HTZ_GV_SQLSTATS");
+        return s;
+    }
+
+    /**
+     * 大小写不敏感整词替换; 词边界: 左右非 [A-Za-z0-9_$#].
+     */
+    static String replaceIgnoreCaseToken(String hay, String needle, String replacement) {
+        if (hay == null || needle == null || needle.isEmpty() || replacement == null) {
+            return hay;
+        }
+        StringBuilder out = new StringBuilder(hay.length() + 16);
+        int i = 0;
+        while (i < hay.length()) {
+            int idx = indexOfIgnoreCase(hay.substring(i), needle);
+            if (idx < 0) {
+                out.append(hay.substring(i));
+                break;
+            }
+            int abs = i + idx;
+            boolean leftOk = abs == 0 || !isIdentChar(hay.charAt(abs - 1));
+            int end = abs + needle.length();
+            boolean rightOk = end >= hay.length() || !isIdentChar(hay.charAt(end));
+            if (leftOk && rightOk) {
+                out.append(hay, i, abs);
+                out.append(replacement);
+                i = end;
+            } else {
+                out.append(hay, i, abs + 1);
+                i = abs + 1;
+            }
+        }
+        return out.toString();
+    }
+
+    private static boolean isIdentChar(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '#';
     }
 
     /**
@@ -234,6 +310,16 @@ public class SqlReportRunner {
      */
     public void appendFromPlan(JdbcSession session, String sqlId, StringBuilder out,
             long deadlineMs, int timeoutSec) throws SQLException, IOException {
+        appendFromPlan(session, sqlId, out, deadlineMs, timeoutSec, false, null);
+    }
+
+    /**
+     * @param htzSections true 时 PLAN/sqlarea/v$sql 改写为 HTZ_GV_*; AWR/对象字典仍走系统视图名
+     * @param htzOwner    HTZ 表所属登录用户; htzSections 时必填
+     */
+    public void appendFromPlan(JdbcSession session, String sqlId, StringBuilder out,
+            long deadlineMs, int timeoutSec, boolean htzSections, String htzOwner)
+            throws SQLException, IOException {
         String template = loadTemplate();
         if (template == null || template.isEmpty()) {
             out.append("[ERROR] ReportSelectScript missing; SELECT sections skipped\n");
@@ -274,11 +360,19 @@ public class SqlReportRunner {
                     if (isAwrPrompt(seg.text)) {
                         nextSqlIsAwr = true;
                     }
-                    out.append(substituteSqlIdForDisplay(seg.text, sqlId)).append('\n');
+                    String promptText = seg.text;
+                    if (htzSections) {
+                        promptText = rewritePromptForHtzDisplay(promptText);
+                    }
+                    out.append(substituteSqlIdForDisplay(promptText, sqlId)).append('\n');
                     break;
                 case SQL:
                     try {
-                        executeQuery(c, seg.text, sqlId, out, stmtTimeout);
+                        String sqlText = seg.text;
+                        if (htzSections && !nextSqlIsAwr) {
+                            sqlText = rewriteViewsForHtz(sqlText, htzOwner);
+                        }
+                        executeQuery(c, sqlText, sqlId, out, stmtTimeout);
                     } catch (SQLException e) {
                         if (nextSqlIsAwr) {
                             // P2: AWR 失败不中断 OBJECT SIZE 等后续段

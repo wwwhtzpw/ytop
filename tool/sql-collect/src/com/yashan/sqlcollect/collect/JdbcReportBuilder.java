@@ -1,20 +1,19 @@
 package com.yashan.sqlcollect.collect;
 
+import com.yashan.sqlcollect.db.CursorSnapshot;
 import com.yashan.sqlcollect.db.JdbcSession;
-import com.yashan.sqlcollect.db.SqlLookup;
+import com.yashan.sqlcollect.db.LiveSqlSource;
+import com.yashan.sqlcollect.db.SqlDataSource;
 import com.yashan.sqlcollect.log.DualLogger;
 import com.yashan.sqlcollect.model.BindValue;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
  * 纯 JDBC 报告构建.
- * ORIGINAL + LITERAL: Java; PLAN/sqlarea/AWR/objects: {@link ReportSelectScript} + JDBC SELECT.
+ * ORIGINAL + LITERAL: 经 {@link SqlDataSource}; PLAN/sqlarea/AWR/objects: {@link SqlReportRunner}.
  */
 public class JdbcReportBuilder {
 
@@ -31,7 +30,21 @@ public class JdbcReportBuilder {
         this.explainPlan = explainPlan;
     }
 
+    /** 兼容: live 源, 不改写报告段. */
     public String build(JdbcSession session, String sqlId, int timeoutSec) throws SQLException {
+        return build(session, sqlId, timeoutSec, LiveSqlSource.INSTANCE, false, null);
+    }
+
+    /**
+     * @param src         游标/bind 来源 (FILE=Live, BOTH=Htz)
+     * @param htzSections true 时 PLAN/sqlarea 走 HTZ 表名改写
+     * @param htzOwner    HTZ schema; htzSections 时必填
+     */
+    public String build(JdbcSession session, String sqlId, int timeoutSec,
+                        SqlDataSource src, boolean htzSections, String htzOwner) throws SQLException {
+        if (src == null) {
+            src = LiveSqlSource.INSTANCE;
+        }
         long deadlineMs = timeoutSec <= 0
                 ? Long.MAX_VALUE
                 : System.currentTimeMillis() + (long) timeoutSec * 1000L;
@@ -42,10 +55,13 @@ public class JdbcReportBuilder {
         out.append("ORIGINAL SQL / LITERAL SQL (JDBC native report)\n");
         out.append("****************************************************************************************\n");
         out.append("sql_id=").append(sqlId == null ? "" : sqlId).append('\n');
+        if (htzSections) {
+            out.append("data_source=HTZ_GV_*\n");
+        }
 
-        CursorRow row;
+        CursorSnapshot snap;
         try {
-            row = loadCursor(c, sqlId, stmtTimeout(deadlineMs, timeoutSec));
+            snap = src.pickCursor(c, sqlId);
         } catch (SQLException e) {
             out.append("[ERROR] load cursor: ").append(e.getMessage()).append('\n');
             if (log != null) {
@@ -53,19 +69,19 @@ public class JdbcReportBuilder {
             }
             return out.toString();
         }
-        if (row == null) {
+        if (snap == null || snap.sqlText == null || snap.sqlText.isEmpty()) {
             out.append("No SQL found in V$SQL for sql_id=").append(sqlId).append('\n');
             return out.toString();
         }
 
         out.append("===== ORIGINAL SQL =====\n");
-        out.append("Schema: ").append(nvl(row.schema))
-                .append(" child=").append(row.child)
-                .append(" inst_id=").append(row.instId)
-                .append(" len=").append(row.sqlText == null ? 0 : row.sqlText.length())
+        out.append("Schema: ").append(nvl(snap.schema))
+                .append(" child=").append(snap.childNumber)
+                .append(" inst_id=").append(snap.instId)
+                .append(" len=").append(snap.sqlText.length())
                 .append('\n');
-        out.append(row.sqlText == null ? "" : row.sqlText);
-        if (row.sqlText != null && !row.sqlText.endsWith("\n")) {
+        out.append(snap.sqlText);
+        if (!snap.sqlText.endsWith("\n")) {
             out.append('\n');
         }
         out.append("--------------------------------------------------------\n");
@@ -76,18 +92,16 @@ public class JdbcReportBuilder {
         }
 
         try {
-            List<BindValue> binds = loadBinds(c, sqlId, row.child, row.instId,
-                    stmtTimeout(deadlineMs, timeoutSec));
+            List<BindValue> binds = src.loadBinds(c, sqlId, snap.childNumber, snap.instId);
             out.append("===== LITERAL SQL =====\n");
-            out.append("Schema: ").append(nvl(row.schema))
-                    .append(" child=").append(row.child)
+            out.append("Schema: ").append(nvl(snap.schema))
+                    .append(" child=").append(snap.childNumber)
                     .append(" (bind values from capture; Java rewrite)\n");
-            if (binds.isEmpty()) {
+            if (binds == null || binds.isEmpty()) {
                 out.append("(no bind capture on executed child; same as ORIGINAL SQL)\n");
-                out.append(row.sqlText == null ? "" : row.sqlText);
+                out.append(snap.sqlText);
             } else {
-                String lit = LiteralBindRewrite.rewrite(row.sqlText, binds);
-                out.append(lit);
+                out.append(LiteralBindRewrite.rewrite(snap.sqlText, binds));
             }
             if (out.charAt(out.length() - 1) != '\n') {
                 out.append('\n');
@@ -107,7 +121,8 @@ public class JdbcReportBuilder {
 
         out.append('\n');
         try {
-            selectSections.appendFromPlan(session, sqlId, out, deadlineMs, timeoutSec);
+            selectSections.appendFromPlan(session, sqlId, out, deadlineMs, timeoutSec,
+                    htzSections, htzOwner);
         } catch (java.io.IOException e) {
             out.append("[ERROR] P1 sections: ").append(e.getMessage()).append('\n');
             if (log != null) {
@@ -121,123 +136,10 @@ public class JdbcReportBuilder {
         }
 
         if (explainPlan && !timedOut(deadlineMs)) {
-            ExplainPlanSection.append(c, sqlId, row.sqlText, out, log,
+            ExplainPlanSection.append(c, sqlId, snap.sqlText, out, log,
                     stmtTimeout(deadlineMs, timeoutSec));
         }
         return out.toString();
-    }
-
-    private static final class CursorRow {
-        String schema;
-        int child;
-        int instId;
-        String sqlText;
-    }
-
-    private CursorRow loadCursor(Connection c, String sqlId, int qTimeout) throws SQLException {
-        SqlLookup.CapturedChild prefer = SqlLookup.pickBestCapturedChild(c, sqlId);
-        if (prefer != null) {
-            CursorRow byChild = loadCursorByChild(c, sqlId, prefer.childNumber, prefer.instId, qTimeout);
-            if (byChild != null) {
-                return byChild;
-            }
-        }
-        String[] queries = new String[] {
-            "SELECT parsing_schema_name, child_number, NVL(inst_id,1), sql_fulltext FROM ("
-                    + " SELECT s.parsing_schema_name, s.child_number, s.inst_id, s.sql_fulltext"
-                    + "   FROM gv$sql s WHERE s.sql_id = ?"
-                    + "  ORDER BY " + SqlLookup.ORDER_GV_PREFER_CAPTURED
-                    + ") WHERE ROWNUM = 1",
-            "SELECT parsing_schema_name, child_number, 1, sql_fulltext FROM ("
-                    + " SELECT s.parsing_schema_name, s.child_number, s.sql_fulltext"
-                    + "   FROM v$sql s WHERE s.sql_id = ?"
-                    + "  ORDER BY " + SqlLookup.ORDER_V_PREFER_CAPTURED
-                    + ") WHERE ROWNUM = 1"
-        };
-        for (String q : queries) {
-            try (PreparedStatement ps = c.prepareStatement(q)) {
-                if (qTimeout > 0) {
-                    ps.setQueryTimeout(qTimeout);
-                }
-                ps.setString(1, sqlId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        continue;
-                    }
-                    CursorRow row = new CursorRow();
-                    row.schema = rs.getString(1);
-                    row.child = rs.getInt(2);
-                    row.instId = rs.getInt(3);
-                    row.sqlText = JdbcSession.readClob(rs.getClob(4));
-                    return row;
-                }
-            } catch (SQLException e) {
-                if (log != null) {
-                    log.logDbg("report cursor query failed: " + e.getMessage());
-                }
-            }
-        }
-        return null;
-    }
-
-    private CursorRow loadCursorByChild(Connection c, String sqlId, int child, int instId, int qTimeout)
-            throws SQLException {
-        String[] queries = new String[] {
-            "SELECT parsing_schema_name, child_number, NVL(inst_id,1), sql_fulltext FROM gv$sql "
-                    + "WHERE sql_id = ? AND child_number = ? AND NVL(inst_id,1) = ? AND ROWNUM = 1",
-            "SELECT parsing_schema_name, child_number, 1, sql_fulltext FROM v$sql "
-                    + "WHERE sql_id = ? AND child_number = ? AND ROWNUM = 1",
-            "SELECT parsing_schema_name, child_number, NVL(inst_id,1), sql_fulltext FROM gv$sql "
-                    + "WHERE sql_id = ? AND child_number = ? AND ROWNUM = 1"
-        };
-        for (int qi = 0; qi < queries.length; qi++) {
-            try (PreparedStatement ps = c.prepareStatement(queries[qi])) {
-                if (qTimeout > 0) {
-                    ps.setQueryTimeout(qTimeout);
-                }
-                ps.setString(1, sqlId);
-                ps.setInt(2, child);
-                if (qi == 0) {
-                    ps.setInt(3, instId);
-                }
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        continue;
-                    }
-                    CursorRow row = new CursorRow();
-                    row.schema = rs.getString(1);
-                    row.child = rs.getInt(2);
-                    row.instId = rs.getInt(3);
-                    row.sqlText = JdbcSession.readClob(rs.getClob(4));
-                    return row;
-                }
-            } catch (SQLException e) {
-                if (log != null) {
-                    log.logDbg("report cursor by child failed: " + e.getMessage());
-                }
-            }
-        }
-        return null;
-    }
-
-    private List<BindValue> loadBinds(Connection c, String sqlId, int child, int instId, int qTimeout)
-            throws SQLException {
-        // qTimeout 暂不透传; 与 export/genbind 同源: gv$/v$/HTZ 择优 filled
-        return SqlLookup.loadBinds(c, sqlId, child, instId, new SqlLookup.WarnOut() {
-            public void warn(String msg) {
-                if (log != null) {
-                    log.logDbg("report binds: " + msg);
-                }
-            }
-        });
-    }
-
-    private static String nvl(String s) {
-        return s == null ? "" : s;
-    }
-
-    private static boolean timedOut(long deadlineMs) {
-        return System.currentTimeMillis() > deadlineMs;
     }
 
     private static int stmtTimeout(long deadlineMs, int overallTimeoutSec) {
@@ -249,5 +151,13 @@ public class JdbcReportBuilder {
             return 1;
         }
         return Math.max(1, (int) ((leftMs + 999L) / 1000L));
+    }
+
+    private static boolean timedOut(long deadlineMs) {
+        return System.currentTimeMillis() > deadlineMs;
+    }
+
+    private static String nvl(String s) {
+        return s == null ? "" : s;
     }
 }

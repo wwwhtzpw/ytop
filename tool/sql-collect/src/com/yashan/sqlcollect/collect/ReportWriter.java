@@ -1,6 +1,8 @@
 package com.yashan.sqlcollect.collect;
 
 import com.yashan.sqlcollect.db.JdbcSession;
+import com.yashan.sqlcollect.db.LiveSqlSource;
+import com.yashan.sqlcollect.db.SqlDataSource;
 import com.yashan.sqlcollect.log.DualLogger;
 
 import java.io.IOException;
@@ -21,6 +23,9 @@ public class ReportWriter {
     private final DualLogger log;
     private final JdbcReportBuilder builder;
     private int reportTimeoutSec = DEFAULT_REPORT_TIMEOUT_SEC;
+    private SqlDataSource reportSrc = LiveSqlSource.INSTANCE;
+    private boolean htzSections;
+    private String htzOwner;
 
     public ReportWriter() {
         this(null);
@@ -42,6 +47,18 @@ public class ReportWriter {
     /** 是否追加 EXPLAIN PLAN 段 (默认 false; 仅 SELECT/WITH CTE). */
     public void setExplainPlan(boolean on) {
         builder.setExplainPlan(on);
+    }
+
+    /**
+     * 报告数据源与段改写开关.
+     * @param src   FILE→Live; BOTH→Htz
+     * @param htz   true 时 PLAN/sqlarea 改写为 HTZ 表
+     * @param owner HTZ schema; htz 时必填
+     */
+    public void setReportDataSource(SqlDataSource src, boolean htz, String owner) {
+        this.reportSrc = src == null ? LiveSqlSource.INSTANCE : src;
+        this.htzSections = htz;
+        this.htzOwner = owner;
     }
 
     /**
@@ -68,7 +85,6 @@ public class ReportWriter {
     }
 
     private static boolean existsSqlId(Connection c, String sqlId, String view) throws SQLException {
-        // ROWNUM=1 避免大结果; 视图名白名单防注入
         String v = view == null ? "" : view.trim().toLowerCase();
         if (!"gv$sql".equals(v) && !"v$sql".equals(v)
                 && !"gv$sqlstats".equals(v) && !"v$sqlstats".equals(v)) {
@@ -85,7 +101,7 @@ public class ReportWriter {
     }
 
     public String buildReport(JdbcSession session, String sqlId) throws SQLException, IOException {
-        return builder.build(session, sqlId, reportTimeoutSec);
+        return builder.build(session, sqlId, reportTimeoutSec, reportSrc, htzSections, htzOwner);
     }
 
     public boolean isValidReport(String report) {
@@ -95,7 +111,6 @@ public class ReportWriter {
         if (report.contains("===== ORIGINAL SQL =====")) {
             return true;
         }
-        // 游标已淘汰等
         if (report.contains("No SQL found in V$SQL")) {
             return false;
         }
