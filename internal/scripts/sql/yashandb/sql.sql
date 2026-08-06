@@ -894,7 +894,7 @@ SELECT PLAN_HASH_VALUE||'' PHV,
             THEN ROUND(PLSQL_EXEC_TIME / DECODE(EXECUTIONS, 0, 1, EXECUTIONS) / 1000 / 1000 / 60, 2) || 'm'
         ELSE ROUND(PLSQL_EXEC_TIME / DECODE(EXECUTIONS, 0, 1, EXECUTIONS) / 1000 / 1000 / 60 / 60, 2) || 'h'
     END AS PLSQL_W_P,
-    OUTLINE_CATEGORY outline
+    CAST(NULL AS VARCHAR(64)) AS outline
   FROM v$sqlarea
 where sql_id = '&&sqlid';
 

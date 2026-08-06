@@ -18,24 +18,59 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 从 gv$/v$sql 列出候选 sql_id.
- * 每一轮: 先按活跃会话 (GV$SESSION, 执行时间长优先) 排前面, 再接其余候选.
+ * 从 gv$/v$sql 或 HTZ_GV_SQL 列出候选 sql_id.
+ * FILE: gv$/v$sql 池; activeSession 时活跃会话置顶.
+ * BOTH|TABLE: HTZ_GV_SQL; 排序=活跃会话(可选) → backupNew → 其余.
+ * BACKUP: 调用方不应走本 list 做报告.
  */
 public class CandidateService {
 
     private final DualLogger log;
+    private final List<String> excludeSchemas;
+    private final List<String> includeSchemas;
 
     public CandidateService(DualLogger log) {
+        this(log, null, null);
+    }
+
+    public CandidateService(DualLogger log, List<String> excludeSchemas) {
+        this(log, excludeSchemas, null);
+    }
+
+    public CandidateService(DualLogger log, List<String> excludeSchemas,
+                            List<String> includeSchemas) {
         this.log = log;
+        this.excludeSchemas = excludeSchemas == null || excludeSchemas.isEmpty()
+                ? NoiseFilter.builtinExcludeSchemas()
+                : NoiseFilter.normalizeExcludeSchemas(excludeSchemas);
+        this.includeSchemas = includeSchemas == null
+                ? new ArrayList<String>()
+                : NoiseFilter.normalizeExcludeSchemas(includeSchemas);
+    }
+
+    /** 单测: 当前排除名单的 SQL NOT IN 片段. */
+    String excludeNotInSql() {
+        return NoiseFilter.sqlNotInList(excludeSchemas);
+    }
+
+    /** 单测: schema 过滤完整谓词. */
+    String schemaFilterSql() {
+        return NoiseFilter.sqlSchemaFilter("UPPER(parsing_schema_name)",
+                excludeSchemas, includeSchemas);
     }
 
     /**
-     * 按 sink 模式列出候选: FILE 走 gv$/v$sql; TABLE|BOTH 仅 HTZ_GV_SQL (不查 session/gv$sql).
-     * backupNewIds 在 HTZ 模式下置顶; collected 过滤由调用方负责.
+     * 按 sink 模式列出候选: FILE 走 gv$/v$sql; BOTH|TABLE 仅 HTZ_GV_SQL.
+     * activeSession=true 时扫描 gv$/v$session 置顶; backupNewIds 在 HTZ 模式下次优先.
      */
     public List<SqlCandidate> list(JdbcSession session, SinkMode sink, List<String> backupNewIds) {
+        return list(session, sink, backupNewIds, true);
+    }
+
+    public List<SqlCandidate> list(JdbcSession session, SinkMode sink, List<String> backupNewIds,
+                                   boolean activeSession) {
         if (sink == SinkMode.FILE) {
-            return list(session);
+            return listLive(session, activeSession);
         }
         Connection c = session.getConnection();
         String owner;
@@ -46,29 +81,93 @@ public class CandidateService {
             owner = "";
         }
         List<SqlCandidate> pool = listFromHtz(c, owner);
-        List<SqlCandidate> ordered = prioritizeBackupNew(c, owner, pool, backupNewIds);
+        List<String> activeIds = activeSession ? listActiveSqlIds(c) : new ArrayList<String>();
+        List<SqlCandidate> ordered = mergePriority(c, owner, pool, activeIds, backupNewIds, true);
         int backupN = backupNewIds == null ? 0 : backupNewIds.size();
         log.logInfo("candidates=" + ordered.size()
+                + " active_session=" + activeSession
+                + " active_session_sql=" + activeIds.size()
+                + " active_first=" + countActiveFirst(ordered, activeIds)
                 + " backup_new=" + backupN
                 + " backup_first=" + countBackupFirst(ordered, backupNewIds)
                 + " source=htz");
         return ordered;
     }
 
+    /** 兼容旧调用: 默认开启活跃会话置顶. */
     public List<SqlCandidate> list(JdbcSession session) {
+        return listLive(session, true);
+    }
+
+    private List<SqlCandidate> listLive(JdbcSession session, boolean activeSession) {
         Connection c = session.getConnection();
-        List<String> activeIds = listActiveSqlIds(c);
         List<SqlCandidate> fromGv = queryAll(c, true);
         List<SqlCandidate> pool = fromGv;
         if (pool.isEmpty()) {
             log.logWarn("gv$sql list failed or empty; try v$sql");
             pool = queryAll(c, false);
         }
+        List<String> activeIds = activeSession ? listActiveSqlIds(c) : new ArrayList<String>();
         List<SqlCandidate> ordered = prioritizeActive(c, pool, activeIds);
         log.logInfo("candidates=" + ordered.size()
+                + " active_session=" + activeSession
                 + " active_session_sql=" + activeIds.size()
-                + " active_first=" + countActiveFirst(ordered, activeIds));
+                + " active_first=" + countActiveFirst(ordered, activeIds)
+                + " source=live");
         return ordered;
+    }
+
+    /**
+     * HTZ 候选排序: 活跃会话 → backupNew → 池内其余.
+     * lookupHtz=true 时缺失 id 从 HTZ_GV_SQL 补查.
+     */
+    private List<SqlCandidate> mergePriority(Connection c, String owner, List<SqlCandidate> pool,
+                                             List<String> activeIds, List<String> backupNewIds,
+                                             boolean lookupHtz) {
+        Map<String, SqlCandidate> byId = new LinkedHashMap<String, SqlCandidate>();
+        for (SqlCandidate cand : pool) {
+            if (cand != null && cand.sqlId != null) {
+                byId.put(cand.sqlId, cand);
+            }
+        }
+        List<SqlCandidate> out = new ArrayList<SqlCandidate>();
+        Set<String> seen = new LinkedHashSet<String>();
+        appendIds(out, seen, byId, activeIds, c, owner, lookupHtz);
+        appendIds(out, seen, byId, backupNewIds, c, owner, lookupHtz);
+        for (SqlCandidate cand : pool) {
+            if (cand == null || cand.sqlId == null || seen.contains(cand.sqlId)) {
+                continue;
+            }
+            out.add(cand);
+            seen.add(cand.sqlId);
+        }
+        return out;
+    }
+
+    private void appendIds(List<SqlCandidate> out, Set<String> seen,
+                           Map<String, SqlCandidate> byId, List<String> ids,
+                           Connection c, String owner, boolean lookupHtz) {
+        if (ids == null) {
+            return;
+        }
+        for (String raw : ids) {
+            if (raw == null) {
+                continue;
+            }
+            String id = raw.trim();
+            if (id.length() < 5 || seen.contains(id)) {
+                continue;
+            }
+            SqlCandidate cand = byId.get(id);
+            if (cand == null && lookupHtz) {
+                cand = lookupOneHtz(c, owner, id);
+            }
+            if (cand == null) {
+                continue;
+            }
+            out.add(cand);
+            seen.add(id);
+        }
     }
 
     /** 活跃会话中的 sql_id, 按 exec_start_time 升序 (跑得最久的优先). */
@@ -150,14 +249,15 @@ public class CandidateService {
         return out;
     }
 
-    private static String buildHtzAggregateSql(String tSql, String sqlIdFilter) {
+    private String buildHtzAggregateSql(String tSql, String sqlIdFilter) {
         StringBuilder sb = new StringBuilder();
         sb.append("SELECT sql_id, MAX(parsing_schema_name) AS parsing_schema_name, ");
         sb.append("MAX(DBMS_LOB.GETLENGTH(sql_fulltext)) AS sql_len, ");
         sb.append("MAX(DBMS_LOB.SUBSTR(sql_fulltext, 180, 1)) AS snip ");
         sb.append("FROM ").append(tSql).append(' ');
         sb.append("WHERE parsing_schema_name IS NOT NULL ");
-        sb.append("AND UPPER(parsing_schema_name) NOT IN ('SYS','SYSDBA') ");
+        sb.append("AND ").append(NoiseFilter.sqlSchemaFilter(
+                "UPPER(parsing_schema_name)", excludeSchemas, includeSchemas)).append(' ');
         sb.append("AND sql_id IS NOT NULL ");
         sb.append("AND LENGTH(TRIM(sql_id)) >= 5 ");
         sb.append("AND (sql_fulltext IS NULL OR sql_fulltext NOT LIKE '%")
@@ -168,51 +268,6 @@ public class CandidateService {
         sb.append("GROUP BY sql_id ");
         sb.append("ORDER BY sql_id");
         return sb.toString();
-    }
-
-    /**
-     * backup 本轮新增 sql_id 置顶; 若 HTZ 聚合池中没有则再按 sql_id 补查 HTZ_GV_SQL.
-     */
-    private List<SqlCandidate> prioritizeBackupNew(Connection c, String owner,
-                                                   List<SqlCandidate> pool,
-                                                   List<String> backupNewIds) {
-        if (backupNewIds == null || backupNewIds.isEmpty()) {
-            return pool;
-        }
-        Map<String, SqlCandidate> byId = new LinkedHashMap<String, SqlCandidate>();
-        for (SqlCandidate cand : pool) {
-            if (cand != null && cand.sqlId != null) {
-                byId.put(cand.sqlId, cand);
-            }
-        }
-        List<SqlCandidate> out = new ArrayList<SqlCandidate>();
-        Set<String> seen = new LinkedHashSet<String>();
-        for (String id : backupNewIds) {
-            if (id == null) {
-                continue;
-            }
-            id = id.trim();
-            if (id.length() < 5 || seen.contains(id)) {
-                continue;
-            }
-            SqlCandidate cand = byId.get(id);
-            if (cand == null) {
-                cand = lookupOneHtz(c, owner, id);
-            }
-            if (cand == null) {
-                continue;
-            }
-            out.add(cand);
-            seen.add(id);
-        }
-        for (SqlCandidate cand : pool) {
-            if (cand == null || cand.sqlId == null || seen.contains(cand.sqlId)) {
-                continue;
-            }
-            out.add(cand);
-            seen.add(cand.sqlId);
-        }
-        return out;
     }
 
     private SqlCandidate lookupOneHtz(Connection c, String owner, String sqlId) {
@@ -244,7 +299,8 @@ public class CandidateService {
                 + "MAX(DBMS_LOB.SUBSTR(sql_fulltext, 180, 1)) AS snip "
                 + "FROM " + view + " "
                 + "WHERE parsing_schema_name IS NOT NULL "
-                + "AND UPPER(parsing_schema_name) NOT IN ('SYS','SYSDBA') "
+                + "AND " + NoiseFilter.sqlSchemaFilter(
+                        "UPPER(parsing_schema_name)", excludeSchemas, includeSchemas) + " "
                 + "AND sql_id IS NOT NULL "
                 + "AND sql_fulltext NOT LIKE '%" + NoiseFilter.PROBE_TAG + "%' "
                 + "GROUP BY sql_id "
@@ -314,7 +370,8 @@ public class CandidateService {
                     + "MAX(DBMS_LOB.SUBSTR(sql_fulltext, 180, 1)) "
                     + "FROM gv$sql WHERE sql_id = ? "
                     + "AND parsing_schema_name IS NOT NULL "
-                    + "AND UPPER(parsing_schema_name) NOT IN ('SYS','SYSDBA') "
+                    + "AND " + NoiseFilter.sqlSchemaFilter(
+                            "UPPER(parsing_schema_name)", excludeSchemas, includeSchemas) + " "
                     + "AND (sql_fulltext IS NULL OR sql_fulltext NOT LIKE '%"
                     + NoiseFilter.PROBE_TAG + "%') "
                     + "GROUP BY sql_id",
@@ -323,7 +380,8 @@ public class CandidateService {
                     + "MAX(DBMS_LOB.SUBSTR(sql_fulltext, 180, 1)) "
                     + "FROM v$sql WHERE sql_id = ? "
                     + "AND parsing_schema_name IS NOT NULL "
-                    + "AND UPPER(parsing_schema_name) NOT IN ('SYS','SYSDBA') "
+                    + "AND " + NoiseFilter.sqlSchemaFilter(
+                            "UPPER(parsing_schema_name)", excludeSchemas, includeSchemas) + " "
                     + "AND (sql_fulltext IS NULL OR sql_fulltext NOT LIKE '%"
                     + NoiseFilter.PROBE_TAG + "%') "
                     + "GROUP BY sql_id"
@@ -349,11 +407,11 @@ public class CandidateService {
         return null;
     }
 
-    private static SqlCandidate toCandidate(String sqlId, String schema, int sqlLen, String snip) {
+    private SqlCandidate toCandidate(String sqlId, String schema, int sqlLen, String snip) {
         if (sqlId == null || sqlId.length() < 5) {
             return null;
         }
-        if (NoiseFilter.isExcludedSchema(schema)) {
+        if (!NoiseFilter.passesSchemaFilter(schema, excludeSchemas, includeSchemas)) {
             return null;
         }
         if (sqlLen < NoiseFilter.MIN_SQL_CHARS) {

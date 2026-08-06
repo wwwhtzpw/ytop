@@ -20,7 +20,10 @@ public final class HtzTables {
     public static final String GV_BIND = "HTZ_GV_SQL_BIND_CAPTURE";
     /** 对应 GV$SQL_PLAN; 去重键 (INST_ID, SQL_ID, CHILD_NUMBER, PLAN_HASH_VALUE, ID) */
     public static final String GV_SQL_PLAN = "HTZ_GV_SQL_PLAN";
-    public static final String REPLAY_PKG = "HTZ_SQL_REPLAY_PKG";
+    /** 本轮 eligible 游标键集 (GTT 或普通表) */
+    public static final String ELIG_SQL = "HTZ_ELIG_SQL";
+    /** 本轮 STATS MERGE 相关 sql_id 集合 */
+    public static final String BACKUP_R = "HTZ_BACKUP_R";
 
     private HtzTables() {}
 

@@ -1,6 +1,5 @@
 package com.yashan.sqlcollect.replay;
 
-import com.yashan.sqlcollect.db.HtzTables;
 import com.yashan.sqlcollect.db.JdbcPool;
 import com.yashan.sqlcollect.db.JdbcSession;
 import com.yashan.sqlcollect.model.ReplayPackageMeta;
@@ -22,7 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** JDBC replay 引擎 (file/htz/gv), 进程内调用; 连接经 {@link JdbcPool} 复用 */
+/** JDBC replay 引擎 (file/gv), 进程内调用; 连接经 {@link JdbcPool} 复用 */
 public class ReplayEngine {
 
     private final String jdbcUrl;
@@ -236,6 +235,31 @@ public class ReplayEngine {
                 return r;
             }
             List<String[]> binds = readBinds(bindsFile);
+            // 若旁路有 binds.json (含 name), 用方案 A 对齐; 否则仅 :name→?
+            java.nio.file.Path bindsJson = Paths.get(bindsFile).resolveSibling("binds.json");
+            if (Files.exists(bindsJson)) {
+                try {
+                    String json = readFile(bindsJson.toString());
+                    List<com.yashan.sqlcollect.model.BindValue> named =
+                            JsonBinds.read(json);
+                    if (named != null && !named.isEmpty()) {
+                        com.yashan.sqlcollect.collect.LiteralBindRewrite.Aligned aligned =
+                                com.yashan.sqlcollect.collect.LiteralBindRewrite.align(sql, named);
+                        for (String w : aligned.warnings) {
+                            out.println("replay warn bind align: " + w);
+                        }
+                        sql = aligned.sql;
+                        binds = com.yashan.sqlcollect.db.SqlLookup.toReplayRows(aligned.binds);
+                        out.dbg("bind_align=A from binds.json");
+                    }
+                } catch (Exception e) {
+                    out.println("replay warn binds.json align skipped: " + e.getMessage());
+                    sql = com.yashan.sqlcollect.collect.LiteralBindRewrite.toQuestionMarks(sql);
+                }
+            } else {
+                sql = com.yashan.sqlcollect.collect.LiteralBindRewrite.toQuestionMarks(sql);
+                out.dbg("bind_align=qmark (no binds.json)");
+            }
             dumpBinds(binds);
             out.println("replay source=file");
             out.step("resolve_creds", "schema=" + (schema == null ? "" : schema));
@@ -373,21 +397,33 @@ public class ReplayEngine {
             // gv 无采集快照指纹: 仅审计打印, 不做 mismatch 硬失败
             out.println("replay sql_sha256=" + ReplayPackageMeta.sha256Utf8(sql) + " (gv live; no package fingerprint)");
             out.step("load_binds_gv", "sql_id=" + sqlId + " child=" + child);
-            binds = loadGvBinds(cLookup, sqlId, child, instId);
-            // 选定 child 仍无绑定 (过滤 last_captured 后为空) 时, 再按 sql_id 全局择优取一次
-            if (binds == null || binds.isEmpty()) {
-                List<String[]> byId = com.yashan.sqlcollect.db.SqlLookup.toReplayRows(
-                        com.yashan.sqlcollect.db.SqlLookup.loadBindsBySqlId(cLookup, sqlId,
-                                new com.yashan.sqlcollect.db.SqlLookup.WarnOut() {
-                                    public void warn(String msg) {
-                                        out.println("replay warn " + msg);
-                                    }
-                                }));
-                if (byId != null && !byId.isEmpty()) {
-                    binds = byId;
-                    out.println("replay binds fallback loadBindsBySqlId n=" + binds.size());
+            List<com.yashan.sqlcollect.model.BindValue> namedBinds =
+                    com.yashan.sqlcollect.db.SqlLookup.loadBinds(cLookup, sqlId, child, instId,
+                            new com.yashan.sqlcollect.db.SqlLookup.WarnOut() {
+                                public void warn(String msg) {
+                                    out.println("replay warn " + msg);
+                                }
+                            });
+            if (namedBinds == null || namedBinds.isEmpty()) {
+                namedBinds = com.yashan.sqlcollect.db.SqlLookup.loadBindsBySqlId(cLookup, sqlId,
+                        new com.yashan.sqlcollect.db.SqlLookup.WarnOut() {
+                            public void warn(String msg) {
+                                out.println("replay warn " + msg);
+                            }
+                        });
+                if (namedBinds != null && !namedBinds.isEmpty()) {
+                    out.println("replay binds fallback loadBindsBySqlId n=" + namedBinds.size());
                 }
             }
+            com.yashan.sqlcollect.collect.LiteralBindRewrite.Aligned aligned =
+                    com.yashan.sqlcollect.collect.LiteralBindRewrite.align(sql, namedBinds);
+            for (String w : aligned.warnings) {
+                out.println("replay warn bind align: " + w);
+            }
+            sql = aligned.sql;
+            binds = com.yashan.sqlcollect.db.SqlLookup.toReplayRows(aligned.binds);
+            out.dbg("bind_align=A placeholders="
+                    + com.yashan.sqlcollect.replay.SqlExecutor.countPlaceholders(sql));
             dumpBinds(binds);
             String kind = classifySql(sql);
             out.step("resolve_creds", "schema=" + (schema == null ? "" : schema));
@@ -428,212 +464,6 @@ public class ReplayEngine {
         out.println("replay summary ok=" + r.ok + " fail=" + r.fail);
         out.step("replay_gv_done", okExec ? "ok" : "fail");
         return r;
-    }
-
-    public ReplayResult replayHtzOne(String sqlId, String mode, boolean force) throws Exception {
-        out.step("replay_htz_one", "sql_id=" + sqlId + " mode=" + mode + " force=" + force);
-        out.step("jdbc_lookup_connect", lookupUser);
-        Connection cLookup = connectAs(lookupUser, lookupPass);
-        out.println("replay lookup-user=" + lookupUser);
-        List<Object[]> rows = new ArrayList<Object[]>();
-        try {
-            out.step("load_htz_rows", sqlId);
-            rows = loadHtzRows(cLookup, sqlId);
-            out.dbg("htz_rows=" + rows.size());
-        } finally {
-            cLookup.close();
-            out.dbg("lookup_connection_closed");
-        }
-        if (rows.isEmpty()) {
-            out.println("replay fail sql_id not found in HTZ_SQL_REPLAY_PKG: " + sqlId);
-            out.step("replay_htz_one_done", "fail not found");
-            return new ReplayResult(0, 1);
-        }
-        int okN = 0;
-        int failN = 0;
-        for (Object[] row : rows) {
-            int child = ((Integer) row[0]).intValue();
-            int instId = ((Integer) row[1]).intValue();
-            String schema = (String) row[2];
-            String sql = (String) row[3];
-            String bj = (String) row[4];
-            String sha = (String) row[5];
-            out.step("htz_row", "sql_id=" + sqlId + " child=" + child + " inst_id=" + instId);
-            out.println("replay source=htz sql_id=" + sqlId + " child=" + child
-                    + " inst_id=" + instId);
-            if (!assertSqlSha256(sql, sha, "htz")) {
-                noteFail("sql_sha256 mismatch");
-                failN++;
-                continue;
-            }
-            List<String[]> binds = JsonBinds.toReplayRows(JsonBinds.read(bj));
-            beginRow(sqlId, child, instId);
-            try {
-                ReplayResult r = execOne(schema, sql, binds, mode, force);
-                okN += r.ok;
-                failN += r.fail;
-            } catch (Exception e) {
-                out.println("replay fail " + e.getMessage());
-                out.dbg("htz_row exception: " + e.getMessage());
-                failN++;
-            } finally {
-                endRow();
-            }
-        }
-        out.println("replay summary ok=" + okN + " fail=" + failN);
-        out.step("replay_htz_one_done", "ok=" + okN + " fail=" + failN);
-        return new ReplayResult(okN, failN);
-    }
-
-    public ReplayResult replayHtzAll(String mode, boolean force) throws Exception {
-        out.step("replay_htz_all", "mode=" + mode + " force=" + force);
-        out.step("jdbc_lookup_connect", lookupUser);
-        Connection cLookup = connectAs(lookupUser, lookupPass);
-        out.println("replay lookup-user=" + lookupUser);
-        List<Object[]> rows = new ArrayList<Object[]>();
-        try {
-            out.step("load_htz_rows", "all");
-            rows = loadHtzRows(cLookup, null);
-            out.dbg("htz_rows=" + rows.size());
-        } finally {
-            cLookup.close();
-            out.dbg("lookup_connection_closed");
-        }
-        if (rows.isEmpty()) {
-            out.println("replay fail HTZ_SQL_REPLAY_PKG is empty");
-            out.step("replay_htz_all_done", "fail empty");
-            return new ReplayResult(0, 1);
-        }
-        int okN = 0;
-        int failN = 0;
-        for (Object[] row : rows) {
-            String sqlId = (String) row[0];
-            int child = ((Integer) row[1]).intValue();
-            int instId = ((Integer) row[2]).intValue();
-            String schema = (String) row[3];
-            String sql = (String) row[4];
-            String bj = (String) row[5];
-            String sha = (String) row[6];
-            out.step("htz_row", "sql_id=" + sqlId + " child=" + child + " inst_id=" + instId);
-            out.println("replay source=htz sql_id=" + sqlId + " child=" + child
-                    + " inst_id=" + instId);
-            if (!assertSqlSha256(sql, sha, "htz")) {
-                noteFail("sql_sha256 mismatch");
-                failN++;
-                continue;
-            }
-            List<String[]> binds = JsonBinds.toReplayRows(JsonBinds.read(bj));
-            beginRow(sqlId, child, instId);
-            try {
-                ReplayResult r = execOne(schema, sql, binds, mode, force);
-                okN += r.ok;
-                failN += r.fail;
-            } catch (Exception e) {
-                out.println("replay fail " + e.getMessage());
-                out.dbg("htz_row exception: " + e.getMessage());
-                failN++;
-            } finally {
-                endRow();
-            }
-        }
-        out.println("replay summary ok=" + okN + " fail=" + failN);
-        out.step("replay_htz_all_done", "ok=" + okN + " fail=" + failN);
-        return new ReplayResult(okN, failN);
-    }
-
-    /**
-     * 加载 HTZ 行. sqlId 非空则按 id 过滤.
-     * 行布局: 有 sqlId 时 [child,inst,schema,sql,binds,sha];
-     * 全表时 [sqlId,child,inst,schema,sql,binds,sha].
-     */
-    private List<Object[]> loadHtzRows(Connection cLookup, String sqlId) throws SQLException {
-        List<Object[]> rows = new ArrayList<Object[]>();
-        String qn = HtzTables.qname(lookupUser, HtzTables.REPLAY_PKG);
-        boolean withSha = true;
-        String baseCols = "child_number, NVL(inst_id,1), parsing_schema, sql_fulltext, binds_json";
-        String colsSha = baseCols + ", sql_sha256";
-        try {
-            if (sqlId != null) {
-                try (PreparedStatement ps = cLookup.prepareStatement(
-                        "SELECT " + colsSha + " FROM " + qn
-                                + " WHERE sql_id = ? ORDER BY child_number, inst_id")) {
-                    ps.setString(1, sqlId);
-                    try (ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) {
-                            rows.add(new Object[] {
-                                Integer.valueOf(rs.getInt(1)),
-                                Integer.valueOf(rs.getInt(2)),
-                                rs.getString(3),
-                                JdbcSession.readClob(rs.getClob(4)),
-                                JdbcSession.readClob(rs.getClob(5)),
-                                rs.getString(6)
-                            });
-                        }
-                    }
-                }
-            } else {
-                try (Statement st = cLookup.createStatement();
-                     ResultSet rs = st.executeQuery(
-                             "SELECT sql_id, " + colsSha + " FROM " + qn
-                                     + " ORDER BY sql_id, child_number, inst_id")) {
-                    while (rs.next()) {
-                        rows.add(new Object[] {
-                            rs.getString(1),
-                            Integer.valueOf(rs.getInt(2)),
-                            Integer.valueOf(rs.getInt(3)),
-                            rs.getString(4),
-                            JdbcSession.readClob(rs.getClob(5)),
-                            JdbcSession.readClob(rs.getClob(6)),
-                            rs.getString(7)
-                        });
-                    }
-                }
-            }
-        } catch (SQLException e) {
-            withSha = false;
-            out.println("replay warn HTZ sql_sha256 column unavailable: " + e.getMessage());
-            rows.clear();
-            if (sqlId != null) {
-                try (PreparedStatement ps = cLookup.prepareStatement(
-                        "SELECT " + baseCols + " FROM " + qn
-                                + " WHERE sql_id = ? ORDER BY child_number, inst_id")) {
-                    ps.setString(1, sqlId);
-                    try (ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) {
-                            rows.add(new Object[] {
-                                Integer.valueOf(rs.getInt(1)),
-                                Integer.valueOf(rs.getInt(2)),
-                                rs.getString(3),
-                                JdbcSession.readClob(rs.getClob(4)),
-                                JdbcSession.readClob(rs.getClob(5)),
-                                null
-                            });
-                        }
-                    }
-                }
-            } else {
-                try (Statement st = cLookup.createStatement();
-                     ResultSet rs = st.executeQuery(
-                             "SELECT sql_id, " + baseCols + " FROM " + qn
-                                     + " ORDER BY sql_id, child_number, inst_id")) {
-                    while (rs.next()) {
-                        rows.add(new Object[] {
-                            rs.getString(1),
-                            Integer.valueOf(rs.getInt(2)),
-                            Integer.valueOf(rs.getInt(3)),
-                            rs.getString(4),
-                            JdbcSession.readClob(rs.getClob(5)),
-                            JdbcSession.readClob(rs.getClob(6)),
-                            null
-                        });
-                    }
-                }
-            }
-        }
-        if (!withSha) {
-            out.println("replay warn sql_sha256 hard-check skipped for HTZ (legacy table)");
-        }
-        return rows;
     }
 
     /** SQL 文本指纹校验; expected 空则仅审计 (legacy).

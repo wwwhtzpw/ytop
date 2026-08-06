@@ -545,7 +545,7 @@ BEGIN
 
         -- v$sqlarea raw values formatted on output
         FOR r IN (
-            SELECT TO_CHAR(PLAN_HASH_VALUE) AS plan_hash_value, OUTLINE_CATEGORY AS outline,
+            SELECT TO_CHAR(PLAN_HASH_VALUE) AS plan_hash_value, CAST(NULL AS VARCHAR(64)) AS outline,
                    EXECUTIONS AS executions,
                    CPU_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS cpu_per_exec,
                    ELAPSED_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS ela_per_exec,

@@ -286,6 +286,10 @@ public final class SqlMapArgs {
         if (!tgtId && !tgtFile) {
             return "create requires target: -t/--tgt-sql-id or -f/--sql-file";
         }
+        String bindErr = validateBindSource();
+        if (bindErr != null) {
+            return bindErr;
+        }
         String old = rejectRemovedVerifyFlags();
         if (old != null) {
             return old;
@@ -320,7 +324,12 @@ public final class SqlMapArgs {
         boolean tgtFile = notEmpty(opt("sql-file", null));
         boolean hasText = srcId || srcFile || tgtId || tgtFile;
         if (name && hasText) {
-            return "verify: --map-name cannot combine with source/target sql-id or files";
+            // -n 时允许附带 -s + -b backup|view, 仅作绑定来源 sql_id
+            boolean bindOnly = isBindSourceKeyword() && srcId && !srcFile && !tgtId && !tgtFile;
+            if (!bindOnly) {
+                return "verify: --map-name cannot combine with source/target sql-id or files"
+                        + " (except -s with -b backup|view for binds)";
+            }
         }
         if (!name && !hasText) {
             return "verify requires --map-name or source/target (same matrix as create)";
@@ -330,6 +339,10 @@ public final class SqlMapArgs {
             if (c != null) {
                 return c.replace("create", "verify");
             }
+        }
+        String bindErr = validateBindSource();
+        if (bindErr != null) {
+            return bindErr;
         }
         String old = rejectRemovedVerifyFlags();
         if (old != null) {
@@ -344,6 +357,38 @@ public final class SqlMapArgs {
         }
         if (!resolveExec()) {
             return "verify requires --exec to run SQL";
+        }
+        return null;
+    }
+
+    /**
+     * -b 取值: backup|view 为关键字; 其它视为绑定文件路径.
+     * @return backup / view / null(未设或文件路径)
+     */
+    public String bindSourceKeyword() {
+        String bf = opt("bind-file", null);
+        if (bf == null) {
+            return null;
+        }
+        String t = bf.trim();
+        if ("backup".equalsIgnoreCase(t) || "view".equalsIgnoreCase(t)) {
+            return t.toLowerCase(Locale.ROOT);
+        }
+        return null;
+    }
+
+    public boolean isBindSourceKeyword() {
+        return bindSourceKeyword() != null;
+    }
+
+    /** -b backup|view 时必须有 -s/--src-sql-id. */
+    public String validateBindSource() {
+        String kw = bindSourceKeyword();
+        if (kw == null) {
+            return null;
+        }
+        if (!notEmpty(opt("src-sql-id", null))) {
+            return "-b " + kw + " requires -s/--src-sql-id (sql_id for bind lookup)";
         }
         return null;
     }
@@ -382,7 +427,11 @@ public final class SqlMapArgs {
         if (!notEmpty(opt("src-sql-id", null))) {
             return "genbind requires -s/--src-sql-id";
         }
-        return null;
+        String bf = opt("bind-file", null);
+        if (bf != null && !bf.trim().isEmpty() && bindSourceKeyword() == null) {
+            return "genbind -b must be backup or view (output path is -o)";
+        }
+        return validateBindSource();
     }
 
     public String validateLit2bind() {
@@ -401,15 +450,18 @@ public final class SqlMapArgs {
         if (!tgtId && !tgtFile) {
             return "genexec requires -t/--tgt-sql-id or -f/--sql-file";
         }
-        return null;
+        return validateBindSource();
     }
 
     public String validatePerf() {
         if (!notEmpty(opt("src-sql-id", null))) {
             return "perf requires -s/--src-sql-id";
         }
-        return validateGenexec() == null ? null
-                : "perf requires -t/--tgt-sql-id or -f/--sql-file";
+        String g = validateGenexec();
+        if (g != null && g.startsWith("genexec requires")) {
+            return "perf requires -t/--tgt-sql-id or -f/--sql-file";
+        }
+        return g;
     }
 
     private static boolean notEmpty(String s) {

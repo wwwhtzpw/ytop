@@ -142,7 +142,7 @@ func runMonitor() {
 	}
 
 	// Check monitor mode DB type support before connecting
-	isDirectMode := cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.CopyScript != "" || cfg.MetricMode
+	isDirectMode := cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.CopyScript != "" || cfg.MetricMode || cfg.EnterCLI
 	if !isDirectMode && cfg.DBType != "yashandb" {
 		fmt.Fprintf(os.Stderr, "Interactive monitor mode only supports YashanDB. Support for other database types is coming soon.\n")
 		os.Exit(1)
@@ -164,7 +164,22 @@ func runMonitor() {
 	defer conn.Close()
 
 	// Auto-detect DB version via CLI -v when --db-version is not set.
-	connector.InitDBVersion(ctx, cfg, conn)
+	if !cfg.EnterCLI {
+		connector.InitDBVersion(ctx, cfg, conn)
+	}
+
+	if cfg.EnterCLI {
+		exec := executor.NewExecutor(cfg, conn)
+		code, err := exec.EnterInteractiveCLI(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+			os.Exit(code)
+		}
+		os.Exit(code)
+	}
 
 	// Check if in metric mode (--metric with -f)
 	if cfg.MetricMode && cfg.ExecuteScript != "" {

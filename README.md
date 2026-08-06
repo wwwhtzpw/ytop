@@ -227,6 +227,20 @@ Enable debug mode to see detailed SQL queries and output:
 
 Debug output is written to `ytop_debug.log` (not stderr). Use `-D` when testing script variable order (`order_source=accept|prelude|sql`).
 
+## Interactive DB CLI (`-e` / `--enter`)
+
+Enter an interactive database client session (yasql / sqlplus / mysql / …) using the same connect / SSH / `-s` source plumbing as `-q`. Requires a real tty; Unix local or Unix SSH only (v1).
+
+```bash
+# Local
+./ytop -C "/ as sysdba" -s /path/to/yasdb.env -e
+
+# Remote via SSH (then type SQL at the CLI prompt; exit to leave)
+./ytop -t host -u user -k ~/.ssh/id_rsa -s /path/to/yasdb.env -e
+```
+
+Cannot combine with `-f` / `-q` / `-r` / `--copy` / `-S` / `-m`. Details: `docs/01-入口与运行模式.md`, `docs/03-使用手册与案例.md` §2.5.
+
 ## Built-in SQL Scripts
 
 ytop ships SQL scripts under `internal/scripts/sql/` (embedded at build time).

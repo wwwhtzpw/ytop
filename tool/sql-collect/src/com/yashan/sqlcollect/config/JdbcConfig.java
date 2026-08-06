@@ -25,7 +25,15 @@ public class JdbcConfig {
             + "user = htz\n"
             + "password = htz123\n"
             + "schema_via_alter = false\n"
-            + "# current_schema = HNCB\n\n"
+            + "# current_schema = HNCB\n"
+            + "# Extra parsing_schema to skip (builtin always: SYS,SYSDBA,SYSTEM).\n"
+            + "# Comma/space separated. CLI -U/--exclude-schemas appends more.\n"
+            + "# exclude-schemas = MONITOR\n"
+            + "# Only collect these parsing_schema (empty = all except exclude).\n"
+            + "# CLI -u/--include-schemas merges with this list.\n"
+            + "# include-schemas = HTZ,APP1\n"
+            + "# Prioritize sql_id from gv$/v$session (default true). CLI overrides.\n"
+            + "# active-session = true\n\n"
             + "# [map.HNCB]\n"
             + "# user = hncb\n"
             + "# password = hncb123\n";
@@ -37,6 +45,20 @@ public class JdbcConfig {
     public String password;
     public boolean schemaViaAlter;
     public String currentSchema = "";
+    /**
+     * [jdbc] exclude-schemas / exclude_schemas 原始值 (可空).
+     * 与内置 SYS/SYSDBA/SYSTEM 及 CLI 合并后才生效.
+     */
+    public String excludeSchemasRaw = "";
+    /**
+     * [jdbc] include-schemas / include_schemas 原始值 (可空=不限制).
+     * 与 CLI --include-schemas 合并为白名单.
+     */
+    public String includeSchemasRaw = "";
+    /**
+     * [jdbc] active-session / active_session; null=未配置(用 CLI 默认 true).
+     */
+    public Boolean activeSessionIni = null;
     /** schema -> [user, password] */
     public Map<String, String[]> maps = new HashMap<String, String[]>();
 
@@ -84,6 +106,18 @@ public class JdbcConfig {
             cfg.schemaViaAlter = cfg.schemaViaAlter || IniUtil.truthy(j.get("login_mode_alter"));
         }
         cfg.currentSchema = j.containsKey("current_schema") ? j.get("current_schema").trim() : "";
+        cfg.excludeSchemasRaw = first(j, "exclude-schemas", "exclude_schemas");
+        if (cfg.excludeSchemasRaw == null) {
+            cfg.excludeSchemasRaw = "";
+        }
+        cfg.includeSchemasRaw = first(j, "include-schemas", "include_schemas");
+        if (cfg.includeSchemasRaw == null) {
+            cfg.includeSchemasRaw = "";
+        }
+        String activeRaw = first(j, "active-session", "active_session");
+        if (activeRaw != null && !activeRaw.trim().isEmpty()) {
+            cfg.activeSessionIni = Boolean.valueOf(IniUtil.truthy(activeRaw.trim()));
+        }
         if (cfg.jdbcUrl == null || cfg.jdbcUrl.isEmpty()) {
             throw new IOException("jdbc config needs jdbc_url");
         }

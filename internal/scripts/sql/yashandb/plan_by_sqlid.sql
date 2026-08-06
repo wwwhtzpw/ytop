@@ -1,11 +1,12 @@
 -- File Name: plan_by_sqlid.sql
 -- Purpose: YashanDB Show execution plan by sql_id from v$sql_plan
 -- Created: 20260516  by  huangtingzhong
--- Updated: 20260802  by  huangtingzhong
+-- Updated: 20260806  by  huangtingzhong
 -- Notes:
 --   Pure SQL output (no DBMS_OUTPUT / anonymous PL/SQL).
 --   Works on READ_ONLY standby where DBMS_OUTPUT.PUT_LINE raises YAS-05398.
 --   Column widths auto-size per plan_hash_value (Operation/Name capped at 120).
+--   Truncate Access/Filter/Projection/etc. early to avoid YAS-04412 on long predicates.
 --   One row per (plan_hash_value, id); no duplicate plan lines.
 --   Pid = parent_id; Ord = id order (no PL/SQL tree walk).
 --   Table: Rows / Bytes / Cost / Time.
@@ -47,49 +48,59 @@ WITH ranked AS (
          p.partition_stop,
          p.other_tag,
          p.temp_space,
-         LPAD(' ', NVL(p.depth, 0) * 2) || p.operation || NVL(' ' || p.options, '') AS op_txt,
+         -- Cap long text early: yasql/engine VARCHAR buffer (YAS-04412) if predicates huge
+         SUBSTR(
+           LPAD(' ', NVL(p.depth, 0) * 2) || p.operation || NVL(' ' || p.options, ''),
+           1, 120
+         ) AS op_txt,
+         SUBSTR(
+           CASE
+             WHEN p.object_name IS NOT NULL THEN
+               p.object_owner || '.' || p.object_name ||
+               CASE
+                 WHEN p.object_type IS NOT NULL THEN ' [' || p.object_type || ']'
+                 ELSE ''
+               END ||
+               CASE
+                 WHEN LENGTH(TRIM(NVL(p.object_alias, ''))) > 0
+                 THEN ' (' || SUBSTR(TRIM(p.object_alias), 1, 80) || ')'
+                 ELSE ''
+               END
+             WHEN LENGTH(TRIM(NVL(p.object_alias, ''))) > 0 THEN
+               SUBSTR(TRIM(p.object_alias), 1, 120)
+             ELSE NULL
+           END,
+           1, 120
+         ) AS name_txt,
          CASE
-           WHEN p.object_name IS NOT NULL THEN
-             p.object_owner || '.' || p.object_name ||
-             CASE
-               WHEN p.object_type IS NOT NULL THEN ' [' || p.object_type || ']'
-               ELSE ''
-             END ||
-             CASE
-               WHEN LENGTH(TRIM(NVL(p.object_alias, ''))) > 0
-               THEN ' (' || TRIM(p.object_alias) || ')'
-               ELSE ''
-             END
-           WHEN LENGTH(TRIM(NVL(p.object_alias, ''))) > 0 THEN
-             TRIM(p.object_alias)
-           ELSE NULL
-         END AS name_txt,
-         CASE
-           WHEN LENGTH(TRIM(NVL(p.access_predicates, ''))) > 0
-           THEN '  -> Access: ' || p.access_predicates
+           WHEN NULLIF(TRIM(SUBSTR(p.access_predicates, 1, 200)), '') IS NOT NULL
+           THEN '  -> Access: ' || SUBSTR(TRIM(SUBSTR(p.access_predicates, 1, 200)), 1, 108)
          END AS access_txt,
          CASE
-           WHEN LENGTH(TRIM(NVL(p.filter_predicates, ''))) > 0
-           THEN '  -> Filter: ' || p.filter_predicates
+           WHEN NULLIF(TRIM(SUBSTR(p.filter_predicates, 1, 200)), '') IS NOT NULL
+           THEN '  -> Filter: ' || SUBSTR(TRIM(SUBSTR(p.filter_predicates, 1, 200)), 1, 108)
          END AS filter_txt,
          -- Prefer PARTITION_INFO; append PARTITION_START..STOP when non-zero
          CASE
-           WHEN LENGTH(TRIM(NVL(p.partition_info, ''))) > 0 THEN
-             '  -> Partition: ' || TRIM(p.partition_info) ||
-             CASE
-               WHEN NVL(p.partition_start, 0) <> 0 OR NVL(p.partition_stop, 0) <> 0
-               THEN ' (' || NVL(TO_CHAR(p.partition_start), '?') || '..' ||
-                    NVL(TO_CHAR(p.partition_stop), '?') || ')'
-               ELSE ''
-             END
+           WHEN NULLIF(TRIM(SUBSTR(p.partition_info, 1, 200)), '') IS NOT NULL THEN
+             SUBSTR(
+               '  -> Partition: ' || TRIM(SUBSTR(p.partition_info, 1, 200)) ||
+               CASE
+                 WHEN NVL(p.partition_start, 0) <> 0 OR NVL(p.partition_stop, 0) <> 0
+                 THEN ' (' || NVL(TO_CHAR(p.partition_start), '?') || '..' ||
+                      NVL(TO_CHAR(p.partition_stop), '?') || ')'
+                 ELSE ''
+               END,
+               1, 120
+             )
            WHEN NVL(p.partition_start, 0) <> 0 OR NVL(p.partition_stop, 0) <> 0 THEN
              '  -> Partition: ' ||
              NVL(TO_CHAR(p.partition_start), '?') || '..' ||
              NVL(TO_CHAR(p.partition_stop), '?')
          END AS part_txt,
          CASE
-           WHEN LENGTH(TRIM(NVL(p.other_tag, ''))) > 0
-           THEN '  -> Other: ' || TRIM(p.other_tag)
+           WHEN NULLIF(TRIM(SUBSTR(p.other_tag, 1, 200)), '') IS NOT NULL
+           THEN '  -> Other: ' || SUBSTR(TRIM(SUBSTR(p.other_tag, 1, 200)), 1, 108)
          END AS other_txt,
          CASE
            WHEN NVL(p.temp_space, 0) <> 0
@@ -105,8 +116,8 @@ WITH ranked AS (
                 ' io=' || NVL(TO_CHAR(p.io_cost), '0')
          END AS cpuio_txt,
          CASE
-           WHEN LENGTH(TRIM(NVL(p.projection, ''))) > 0
-           THEN '  -> Projection: ' || p.projection
+           WHEN NULLIF(TRIM(SUBSTR(p.projection, 1, 200)), '') IS NOT NULL
+           THEN '  -> Projection: ' || SUBSTR(TRIM(SUBSTR(p.projection, 1, 200)), 1, 108)
          END AS proj_txt,
          ROW_NUMBER() OVER (
            PARTITION BY p.plan_hash_value, p.id

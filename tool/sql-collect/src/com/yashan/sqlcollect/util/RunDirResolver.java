@@ -15,7 +15,7 @@ import java.util.regex.Pattern;
 /**
  * 解析 collect/replay 运行目录: base/yyyyMMddHHmmss.
  * 默认沿用最新时间戳子目录; --new-run 新建; 无子目录则创建.
- * 不再回退旧版扁平 outdir.
+ * 目录不存在才创建; 创建失败或创建后仍非目录则抛 IOException (由调用方退出).
  */
 public final class RunDirResolver {
 
@@ -30,7 +30,7 @@ public final class RunDirResolver {
         public final Path baseOutdir;
         /** 实际读写 reports/replay/collected 的目录 */
         public final Path runDir;
-        /** 是否本轮新建了时间戳目录 */
+        /** 是否本轮新建了时间戳目录 (此前不存在) */
         public final boolean created;
         /** pinned | latest | new */
         public final String mode;
@@ -53,27 +53,52 @@ public final class RunDirResolver {
 
         // 已指向某个时间戳 run 目录
         if (RUN_DIR_NAME.matcher(name).matches()) {
-            Files.createDirectories(out);
+            ensureDirectory(out);
             Path base = out.getParent() == null ? out : out.getParent();
             return new Result(base, out, false, "pinned");
         }
 
-        Files.createDirectories(out);
+        ensureDirectory(out);
 
         if (newRun) {
             Path run = out.resolve(nowStamp());
-            Files.createDirectories(run);
-            return new Result(out, run, true, "new");
+            boolean created = ensureDirectory(run);
+            return new Result(out, run, created, "new");
         }
 
         Path latest = findLatestRunDir(out);
         if (latest != null) {
+            ensureDirectory(latest);
             return new Result(out, latest, false, "latest");
         }
 
         Path run = out.resolve(nowStamp());
-        Files.createDirectories(run);
-        return new Result(out, run, true, "new");
+        boolean created = ensureDirectory(run);
+        return new Result(out, run, created, "new");
+    }
+
+    /**
+     * 目录不存在则创建; 已存在则复用.
+     *
+     * @return true 表示本调用新建了目录; false 表示此前已存在
+     * @throws IOException 创建失败, 或结束后仍不是目录 (例如路径上是普通文件)
+     */
+    public static boolean ensureDirectory(Path dir) throws IOException {
+        if (dir == null) {
+            throw new IOException("directory path is null");
+        }
+        boolean existed = Files.isDirectory(dir);
+        if (!existed) {
+            try {
+                Files.createDirectories(dir);
+            } catch (IOException e) {
+                throw new IOException("create directory failed: " + dir + ": " + e.getMessage(), e);
+            }
+        }
+        if (!Files.isDirectory(dir)) {
+            throw new IOException("path is not a directory after create: " + dir);
+        }
+        return !existed;
     }
 
     public static Path findLatestRunDir(Path base) throws IOException {

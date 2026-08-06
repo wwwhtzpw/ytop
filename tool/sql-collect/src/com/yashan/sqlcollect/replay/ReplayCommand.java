@@ -81,8 +81,13 @@ public class ReplayCommand {
         if ("gvsql".equals(source) || "gv$".equals(source) || "gv$sql".equals(source)) {
             source = "gv";
         }
-        if (!"file".equals(source) && !"htz".equals(source) && !"gv".equals(source)) {
-            log.logError("--source must be file, htz, or gv");
+        if ("htz".equals(source) || "table".equals(source) || "pkg".equals(source)) {
+            log.logError("--source htz removed (HTZ_SQL_REPLAY_PKG deleted);"
+                    + " use --source file or --source gv");
+            return 2;
+        }
+        if (!"file".equals(source) && !"gv".equals(source)) {
+            log.logError("--source must be file or gv");
             return 2;
         }
 
@@ -370,54 +375,9 @@ public class ReplayCommand {
                 okN = r[0];
                 failN = r[1];
             } else {
-                if (!sqlIds.isEmpty()) {
-                    List<String> targets = filterSqlIdsByDone(sqlIds, doneKeys, skipDone, log);
-                    if (targets.isEmpty()) {
-                        log.logInfo("all htz sql_id already ok; nothing to replay");
-                        finished.set(true);
-                        return 0;
-                    }
-                    log.logInfo("targets=" + targets.size());
-                    final String modeLabelHtz = dry ? "dry-run-ok" : "exec-ok";
-                    int[] r = mapParallel(parallel, targets, new Worker<String>() {
-                        public boolean run(String sid) throws Exception {
-                            boolean ok;
-                            try {
-                                ok = replayWithSessions(engine, new Callable<ReplayEngine.ReplayResult>() {
-                                    public ReplayEngine.ReplayResult call() throws Exception {
-                                        return engine.replayHtzOne(sid, mode, force);
-                                    }
-                                }, sessions, timeoutSec);
-                            } catch (Exception e) {
-                                String em = e.getMessage() == null
-                                        ? e.getClass().getSimpleName() : e.getMessage();
-                                engine.noteFail(em);
-                                log.logDbg("replayHtz exception sql_id=" + sid + " err=" + em);
-                                ok = false;
-                            }
-                            if (ok) {
-                                String detail = engine.takeLastOkDetail();
-                                log.logInfo(modeLabelHtz + " source=htz sql_id=" + sid
-                                        + (detail.isEmpty() ? "" : " " + detail));
-                            } else {
-                                String reason = engine.takeLastFailReason();
-                                log.logWarn("fail source=htz sql_id=" + sid
-                                        + (reason.isEmpty() ? "" : " reason=" + reason));
-                            }
-                            return ok;
-                        }
-                    }, timeoutSec);
-                    okN = r[0];
-                    failN = r[1];
-                } else {
-                    log.logInfo("htz_all rows");
-                    if (sessions > 1) {
-                        log.logDbg("htz_all ignores --sessions=" + sessions + "; forcing sessions=1");
-                    }
-                    ReplayEngine.ReplayResult r = engine.replayHtzAll(mode, force);
-                    okN = r.ok;
-                    failN = r.fail;
-                }
+                log.logError("unsupported --source: " + source);
+                finished.set(true);
+                return 2;
             }
             // 工作完成即标记, 勿等外层 finally, 降低 watchdog 误判
             finished.set(true);

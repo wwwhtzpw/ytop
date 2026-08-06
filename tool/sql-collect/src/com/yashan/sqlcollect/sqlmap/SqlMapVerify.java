@@ -1,5 +1,6 @@
 package com.yashan.sqlcollect.sqlmap;
 
+import com.yashan.sqlcollect.collect.LiteralBindRewrite;
 import com.yashan.sqlcollect.config.JdbcConfig;
 import com.yashan.sqlcollect.db.JdbcPool;
 import com.yashan.sqlcollect.db.JdbcSession;
@@ -60,9 +61,13 @@ public final class SqlMapVerify {
                     binds = SqlLookup.toReplayRows(
                             SqlLookup.loadBindsBySqlId(c, srcId, SqlMapIo.warn(log)));
                 }
+                SqlMapExec.AlignPair ap = SqlMapExec.alignForExec(c, a, srcText, binds, log);
+                srcText = ap.sql;
+                binds = ap.binds;
+                tgtText = LiteralBindRewrite.toQuestionMarks(tgtText);
                 int ph = SqlExecutor.countPlaceholders(srcText);
                 if (ph > 0 && binds.isEmpty()) {
-                    log.logError("no binds; run genbind -s <sql_id> or provide -b");
+                    log.logError("no binds; run genbind -s <sql_id> or provide -b file|backup|view");
                     return 1;
                 }
                 return runChecks(c, a, srcText, tgtText, srcId, tgtId, binds,
@@ -84,7 +89,13 @@ public final class SqlMapVerify {
             binds = SqlLookup.toReplayRows(
                     SqlLookup.loadBindsBySqlId(c, src.sqlId, SqlMapIo.warn(log)));
         }
-        return runChecks(c, a, src.text, tgt.text, src.sqlId, tgt.sqlId, binds,
+        String srcText = src.text;
+        String tgtText = tgt.text;
+        SqlMapExec.AlignPair ap = SqlMapExec.alignForExec(c, a, srcText, binds, log);
+        srcText = ap.sql;
+        binds = ap.binds;
+        tgtText = LiteralBindRewrite.toQuestionMarks(tgtText);
+        return runChecks(c, a, srcText, tgtText, src.sqlId, tgt.sqlId, binds,
                 srcPlanBefore, null, log);
     }
 

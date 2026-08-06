@@ -50,8 +50,27 @@ public final class SqlMapIo {
         try {
             JdbcSession sess = new JdbcSession(cfg, log, pool);
             try {
+                SqlLookup.BindSource src = SqlLookup.BindSource.AUTO;
+                String kw = a.bindSourceKeyword();
+                if ("backup".equals(kw)) {
+                    src = SqlLookup.BindSource.BACKUP;
+                } else if ("view".equals(kw)) {
+                    src = SqlLookup.BindSource.VIEW;
+                }
                 List<BindValue> binds = SqlLookup.loadBindsBySqlId(sess.getConnection(), sqlId,
+                        src, warn(log));
+                // 方案 A: 结合 peep 文本 LTR 重排, 使一行一值可直接配全? SQL
+                SqlLookup.SqlTextInfo info = SqlLookup.loadSqlText(sess.getConnection(), sqlId,
                         warn(log));
+                if (info.found && binds != null && !binds.isEmpty()) {
+                    com.yashan.sqlcollect.collect.LiteralBindRewrite.Aligned aligned =
+                            com.yashan.sqlcollect.collect.LiteralBindRewrite.align(
+                                    info.sqlText, binds);
+                    for (String w : aligned.warnings) {
+                        log.logInfo("[WARN] bind align: " + w);
+                    }
+                    binds = aligned.binds;
+                }
                 int filled = 0;
                 StringBuilder sb = new StringBuilder();
                 for (BindValue b : binds) {
@@ -66,10 +85,12 @@ public final class SqlMapIo {
                 }
                 Files.write(Paths.get(out), sb.toString().getBytes(StandardCharsets.UTF_8));
                 log.logInfo("genbind sql_id=" + sqlId + " n=" + binds.size()
-                        + " filled=" + filled + " out=" + out);
+                        + " filled=" + filled + " out=" + out
+                        + " bind_source=" + src.name().toLowerCase(java.util.Locale.ROOT)
+                        + " bind_align=A");
                 if (binds.isEmpty()) {
                     log.logWarn("genbind: no captured binds (last_captured empty for all children);"
-                            + " check v$sql_bind_capture / deploy latest sql_collect.jar");
+                            + " check v$sql_bind_capture / HTZ_GV_SQL_BIND_CAPTURE");
                     System.out.println("[WARN] genbind empty; no last_captured values for " + sqlId);
                 } else if (filled == 0) {
                     log.logWarn("genbind: " + binds.size()
@@ -78,7 +99,8 @@ public final class SqlMapIo {
                             + "; redeploy ytop/sql_collect.jar");
                 } else {
                     System.out.println("[OK] genbind " + out + " n=" + binds.size()
-                            + " filled=" + filled);
+                            + " filled=" + filled + " source="
+                            + src.name().toLowerCase(java.util.Locale.ROOT));
                 }
                 return filled > 0 || binds.isEmpty() ? 0 : 1;
             } finally {

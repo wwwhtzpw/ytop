@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 从 gv$/v$sql 取 sql_fulltext / hash / schema; 绑定取自内存 capture 与 HTZ 备份表.
@@ -18,6 +19,13 @@ import java.util.List;
  * 同 child 多 ADDRESS 按 position 去重 (ORDER BY last_captured DESC 后取第一次).
  */
 public final class SqlLookup {
+
+    /** 绑定来源: AUTO=视图+备份混选; VIEW=仅 gv$/v$sql_bind_capture; BACKUP=仅 HTZ_GV_SQL_BIND_CAPTURE. */
+    public enum BindSource {
+        AUTO,
+        VIEW,
+        BACKUP
+    }
 
     /**
      * 已真正捕获: 与 sql.sql 一致, 仅 last_captured 非空 (排除从未 capture 的占位行).
@@ -27,10 +35,8 @@ public final class SqlLookup {
     /** 表别名 b. 上的真正捕获谓词. */
     public static final String PRED_B_CAPTURED = "b.last_captured IS NOT NULL";
 
-    /** 计 filled: 已捕获且 value 有内容. */
-    public static final String PRED_B_FILLED =
-            PRED_B_CAPTURED
-                    + " AND b.value_string IS NOT NULL AND LENGTH(TRIM(b.value_string)) > 0";
+    /** 计 filled: 与已捕获同义 (仅 last_captured; 不做 value_string 长度判断). */
+    public static final String PRED_B_FILLED = PRED_B_CAPTURED;
 
     /**
      * 绑游标排序: 与 sql.sql 一致 — 最新捕获优先, 命名占位优先于 ?, 再按 position.
@@ -71,47 +77,54 @@ public final class SqlLookup {
      * 对齐 sql.sql: 无相关子查询 / 无 filled 聚合.
      */
     public static CapturedChild pickBestCapturedChild(Connection c, String sqlId) {
-        return pickBestCapturedChild(c, sqlId, null);
+        return pickBestCapturedChild(c, sqlId, BindSource.AUTO, null);
     }
 
     public static CapturedChild pickBestCapturedChild(Connection c, String sqlId, WarnOut warn) {
+        return pickBestCapturedChild(c, sqlId, BindSource.AUTO, warn);
+    }
+
+    public static CapturedChild pickBestCapturedChild(Connection c, String sqlId, BindSource source,
+                                                     WarnOut warn) {
         CapturedChild best = null;
         if (c == null || sqlId == null || sqlId.trim().isEmpty()) {
             return null;
         }
+        BindSource src = source == null ? BindSource.AUTO : source;
         String id = sqlId.trim();
-        best = betterByTime(best, scanLatestCaptured(c,
-                "SELECT child_number, NVL(inst_id,1), last_captured"
-                        + " FROM gv$sql_bind_capture"
-                        + " WHERE sql_id = ? AND last_captured IS NOT NULL"
-                        + " ORDER BY last_captured DESC NULLS LAST, child_number",
-                id, "gv$sql_bind_capture", warn));
-        best = betterByTime(best, scanLatestCaptured(c,
-                "SELECT child_number, 1, last_captured"
-                        + " FROM v$sql_bind_capture"
-                        + " WHERE sql_id = ? AND last_captured IS NOT NULL"
-                        + " ORDER BY last_captured DESC NULLS LAST, child_number",
-                id, "v$sql_bind_capture", warn));
-        for (String htz : htzBindTableCandidates(c)) {
-            CapturedChild fromH = scanLatestCaptured(c,
+        if (src == BindSource.AUTO || src == BindSource.VIEW) {
+            best = betterByTime(best, scanLatestCaptured(c,
                     "SELECT child_number, NVL(inst_id,1), last_captured"
-                            + " FROM " + htz
+                            + " FROM gv$sql_bind_capture"
                             + " WHERE sql_id = ? AND last_captured IS NOT NULL"
                             + " ORDER BY last_captured DESC NULLS LAST, child_number",
-                    id, htz, null);
-            if (fromH == null) {
-                // 旧备份表可能无 last_captured, 退回 collect_time
-                fromH = scanLatestCaptured(c,
-                        "SELECT child_number, NVL(inst_id,1), collect_time"
+                    id, "gv$sql_bind_capture", warn));
+            best = betterByTime(best, scanLatestCaptured(c,
+                    "SELECT child_number, 1, last_captured"
+                            + " FROM v$sql_bind_capture"
+                            + " WHERE sql_id = ? AND last_captured IS NOT NULL"
+                            + " ORDER BY last_captured DESC NULLS LAST, child_number",
+                    id, "v$sql_bind_capture", warn));
+        }
+        if (src == BindSource.AUTO || src == BindSource.BACKUP) {
+            for (String htz : htzBindTableCandidates(c)) {
+                CapturedChild fromH = scanLatestCaptured(c,
+                        "SELECT child_number, NVL(inst_id,1), last_captured"
                                 + " FROM " + htz
-                                + " WHERE sql_id = ?"
-                                + " AND value_string IS NOT NULL AND TRIM(value_string) <> ''"
-                                + " ORDER BY collect_time DESC NULLS LAST, child_number",
-                        id, htz + "(collect_time)", warn);
-            } else if (warn != null) {
-                // 已命中 last_captured; 静默
+                                + " WHERE sql_id = ? AND last_captured IS NOT NULL"
+                                + " ORDER BY last_captured DESC NULLS LAST, child_number",
+                        id, htz, null);
+                if (fromH == null) {
+                    // 旧备份表可能无 last_captured 列, 退回 collect_time (不按 value 长度过滤)
+                    fromH = scanLatestCaptured(c,
+                            "SELECT child_number, NVL(inst_id,1), collect_time"
+                                    + " FROM " + htz
+                                    + " WHERE sql_id = ?"
+                                    + " ORDER BY collect_time DESC NULLS LAST, child_number",
+                            id, htz + "(collect_time)", warn);
+                }
+                best = betterByTime(best, fromH);
             }
-            best = betterByTime(best, fromH);
         }
         if (best == null || best.filled <= 0) {
             return null;
@@ -346,42 +359,52 @@ public final class SqlLookup {
      */
     public static List<BindValue> loadBinds(Connection c, String sqlId, int child, int instId,
                                             WarnOut warn) {
+        return loadBinds(c, sqlId, child, instId, BindSource.AUTO, warn);
+    }
+
+    public static List<BindValue> loadBinds(Connection c, String sqlId, int child, int instId,
+                                            BindSource source, WarnOut warn) {
         List<BindValue> best = new ArrayList<BindValue>();
         int bestFilled = -1;
         if (c == null || sqlId == null) {
             return best;
         }
-        List<BindValue> fromGv = dedupeByPosition(loadBindsView(c,
-                "SELECT position, name, datatype_string, value_string FROM gv$sql_bind_capture"
-                        + " WHERE sql_id = ? AND child_number = ? AND inst_id = ?"
-                        + " AND " + PRED_CAPTURED
-                        + " ORDER BY " + ORDER_BIND_ROWS,
-                sqlId, child, Integer.valueOf(instId), warn, "gv$sql_bind_capture"));
-        // inst 对不上时放宽
-        if (countFilled(fromGv) == 0) {
-            fromGv = dedupeByPosition(loadBindsView(c,
+        BindSource src = source == null ? BindSource.AUTO : source;
+        if (src == BindSource.AUTO || src == BindSource.VIEW) {
+            List<BindValue> fromGv = dedupeByPosition(loadBindsView(c,
                     "SELECT position, name, datatype_string, value_string FROM gv$sql_bind_capture"
-                            + " WHERE sql_id = ? AND child_number = ?"
+                            + " WHERE sql_id = ? AND child_number = ? AND inst_id = ?"
                             + " AND " + PRED_CAPTURED
                             + " ORDER BY " + ORDER_BIND_ROWS,
-                    sqlId, child, null, warn, "gv$sql_bind_capture(loose)"));
+                    sqlId, child, Integer.valueOf(instId), warn, "gv$sql_bind_capture"));
+            // inst 对不上时放宽
+            if (countFilled(fromGv) == 0) {
+                fromGv = dedupeByPosition(loadBindsView(c,
+                        "SELECT position, name, datatype_string, value_string FROM gv$sql_bind_capture"
+                                + " WHERE sql_id = ? AND child_number = ?"
+                                + " AND " + PRED_CAPTURED
+                                + " ORDER BY " + ORDER_BIND_ROWS,
+                        sqlId, child, null, warn, "gv$sql_bind_capture(loose)"));
+            }
+            List<BindValue> fromV = dedupeByPosition(loadBindsView(c,
+                    "SELECT position, name, datatype_string, value_string FROM v$sql_bind_capture"
+                            + " WHERE sql_id = ? AND child_number = ? AND " + PRED_CAPTURED
+                            + " ORDER BY " + ORDER_BIND_ROWS,
+                    sqlId, child, null, warn, "v$sql_bind_capture"));
+            best = preferFilled(best, bestFilled, fromGv);
+            bestFilled = countFilled(best);
+            best = preferFilled(best, bestFilled, fromV);
+            bestFilled = countFilled(best);
         }
-        List<BindValue> fromV = dedupeByPosition(loadBindsView(c,
-                "SELECT position, name, datatype_string, value_string FROM v$sql_bind_capture"
-                        + " WHERE sql_id = ? AND child_number = ? AND " + PRED_CAPTURED
-                        + " ORDER BY " + ORDER_BIND_ROWS,
-                sqlId, child, null, warn, "v$sql_bind_capture"));
-        best = preferFilled(best, bestFilled, fromGv);
-        bestFilled = countFilled(best);
-        best = preferFilled(best, bestFilled, fromV);
-        bestFilled = countFilled(best);
 
-        for (String htz : htzBindTableCandidates(c)) {
-            List<BindValue> fromH = loadBindsHtzDedup(c, htz, sqlId, child, instId, warn);
-            List<BindValue> pickH = preferFilled(best, bestFilled, fromH);
-            if (pickH != best) {
-                best = pickH;
-                bestFilled = countFilled(best);
+        if (src == BindSource.AUTO || src == BindSource.BACKUP) {
+            for (String htz : htzBindTableCandidates(c)) {
+                List<BindValue> fromH = loadBindsHtzDedup(c, htz, sqlId, child, instId, warn);
+                List<BindValue> pickH = preferFilled(best, bestFilled, fromH);
+                if (pickH != best) {
+                    best = pickH;
+                    bestFilled = countFilled(best);
+                }
             }
         }
         return best;
@@ -468,11 +491,10 @@ public final class SqlLookup {
                 }
             }
         } catch (SQLException e) {
-            // 无 last_captured 的旧表: 退回 collect_time / value 非空
+            // 无 last_captured 列的旧表: 退回 collect_time (不做 value 长度判断)
             try (PreparedStatement ps = c.prepareStatement(
                     "SELECT position, name, datatype_string, value_string FROM " + htzTable
                             + " WHERE sql_id = ? AND child_number = ? AND NVL(inst_id,1) = ?"
-                            + " AND value_string IS NOT NULL AND TRIM(value_string) <> ''"
                             + " ORDER BY collect_time DESC NULLS LAST,"
                             + " CASE WHEN name IS NOT NULL AND TRIM(name) <> '?' THEN 0 ELSE 1 END,"
                             + " position")) {
@@ -509,38 +531,75 @@ public final class SqlLookup {
 
     /** 仅按 sql_id: last_captured 最新的 child, 再取该 child 绑定; 全空则返回空列表. */
     public static List<BindValue> loadBindsBySqlId(Connection c, String sqlId, WarnOut warn) {
-        CapturedChild prefer = pickBestCapturedChild(c, sqlId, warn);
+        return loadBindsBySqlId(c, sqlId, BindSource.AUTO, warn);
+    }
+
+    public static List<BindValue> loadBindsBySqlId(Connection c, String sqlId, BindSource source,
+                                                   WarnOut warn) {
+        BindSource src = source == null ? BindSource.AUTO : source;
+        CapturedChild prefer = pickBestCapturedChild(c, sqlId, src, warn);
         if (prefer != null) {
             if (warn != null) {
                 warn.warn("bind pick child=" + prefer.childNumber + " inst_id=" + prefer.instId
                         + " filled=" + prefer.filled + " src=" + prefer.source
-                        + " last_captured_ms=" + prefer.lastCapturedMs);
+                        + " last_captured_ms=" + prefer.lastCapturedMs
+                        + " bind_source=" + src.name().toLowerCase(Locale.ROOT));
             }
-            List<BindValue> binds = loadBinds(c, sqlId, prefer.childNumber, prefer.instId, warn);
+            List<BindValue> binds = loadBinds(c, sqlId, prefer.childNumber, prefer.instId, src, warn);
             if (countFilled(binds) > 0 || !binds.isEmpty()) {
                 return binds;
             }
         }
-        // 回退: 按 v$sql_bind_capture 中有 last_captured 的 child 列表逐个试
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT DISTINCT child_number FROM v$sql_bind_capture WHERE sql_id = ?"
-                        + " AND " + PRED_CAPTURED + " ORDER BY child_number")) {
-            ps.setString(1, sqlId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    int ch = rs.getInt(1);
-                    List<BindValue> binds = loadBinds(c, sqlId, ch, 1, warn);
-                    if (countFilled(binds) > 0) {
-                        if (warn != null) {
-                            warn.warn("bind fallback child=" + ch + " filled=" + countFilled(binds));
+        // 回退: VIEW/AUTO 扫 v$sql_bind_capture; BACKUP 扫 HTZ 表 child 列表
+        if (src == BindSource.AUTO || src == BindSource.VIEW) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT DISTINCT child_number FROM v$sql_bind_capture WHERE sql_id = ?"
+                            + " AND " + PRED_CAPTURED + " ORDER BY child_number")) {
+                ps.setString(1, sqlId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        int ch = rs.getInt(1);
+                        List<BindValue> binds = loadBinds(c, sqlId, ch, 1, src, warn);
+                        if (countFilled(binds) > 0) {
+                            if (warn != null) {
+                                warn.warn("bind fallback child=" + ch
+                                        + " filled=" + countFilled(binds)
+                                        + " bind_source=" + src.name().toLowerCase(Locale.ROOT));
+                            }
+                            return binds;
                         }
-                        return binds;
                     }
                 }
+            } catch (SQLException e) {
+                if (warn != null) {
+                    warn.warn("bind fallback scan: " + e.getMessage());
+                }
             }
-        } catch (SQLException e) {
-            if (warn != null) {
-                warn.warn("bind fallback scan: " + e.getMessage());
+        }
+        if (src == BindSource.BACKUP) {
+            for (String htz : htzBindTableCandidates(c)) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT DISTINCT child_number FROM " + htz + " WHERE sql_id = ?"
+                                + " AND " + PRED_CAPTURED + " ORDER BY child_number")) {
+                    ps.setString(1, sqlId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            int ch = rs.getInt(1);
+                            List<BindValue> binds = loadBinds(c, sqlId, ch, 1, src, warn);
+                            if (countFilled(binds) > 0) {
+                                if (warn != null) {
+                                    warn.warn("bind backup fallback " + htz + " child=" + ch
+                                            + " filled=" + countFilled(binds));
+                                }
+                                return binds;
+                            }
+                        }
+                    }
+                } catch (SQLException e) {
+                    if (warn != null) {
+                        warn.warn("bind backup fallback " + htz + ": " + e.getMessage());
+                    }
+                }
             }
         }
         return new ArrayList<BindValue>();

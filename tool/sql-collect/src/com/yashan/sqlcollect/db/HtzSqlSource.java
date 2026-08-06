@@ -33,21 +33,22 @@ public final class HtzSqlSource implements SqlDataSource {
         return "SELECT 1 FROM " + tSql + " WHERE sql_id = ? AND ROWNUM = 1";
     }
 
-    /** 单测: bind 表按 last_captured 选 child. */
+    /**
+     * 单测: bind 表按 last_captured 选 child.
+     * 仅排除未 capture (last_captured 空 / WAS_CAPTURED=NO); 不做 value_string 长度判断.
+     */
     String pickChildBindLastCapturedSql() {
         return "SELECT child_number, NVL(inst_id,1), last_captured"
                 + " FROM " + tBind
-                + " WHERE sql_id = ? AND last_captured IS NOT NULL"
-                + " AND value_string IS NOT NULL AND TRIM(value_string) <> ''"
+                + " WHERE sql_id = ? AND " + SqlLookup.PRED_CAPTURED
                 + " ORDER BY last_captured DESC NULLS LAST, child_number";
     }
 
-    /** 单测: bind 表无 last_captured 时按 collect_time 选 child. */
+    /** 单测: bind 表无 last_captured 列时按 collect_time 选 child (旧表回退). */
     String pickChildBindCollectTimeSql() {
         return "SELECT child_number, NVL(inst_id,1), collect_time"
                 + " FROM " + tBind
                 + " WHERE sql_id = ?"
-                + " AND value_string IS NOT NULL AND TRIM(value_string) <> ''"
                 + " ORDER BY collect_time DESC NULLS LAST, child_number";
     }
 
@@ -121,11 +122,10 @@ public final class HtzSqlSource implements SqlDataSource {
         }
     }
 
-    /** bind 表无 last_captured 时的 loadBinds 回退 SQL. */
+    /** bind 表无 last_captured 列时的 loadBinds 回退 SQL (旧表). */
     private String bindCollectTimeSql() {
         return "SELECT position, name, datatype_string, value_string FROM " + tBind
                 + " WHERE sql_id = ? AND child_number = ? AND NVL(inst_id,1) = ?"
-                + " AND value_string IS NOT NULL AND TRIM(value_string) <> ''"
                 + " ORDER BY collect_time DESC NULLS LAST,"
                 + " CASE WHEN name IS NOT NULL AND TRIM(name) <> '?' THEN 0 ELSE 1 END,"
                 + " position";

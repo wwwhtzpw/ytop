@@ -24,7 +24,7 @@ import java.util.List;
 /**
  * 绑定刷新判定: 空包绑定 + capture 有更多非空值 => 重导出.
  * HTZ 路径 (HtzSqlSource / useHtz=true): filled 计数查 HTZ_GV_SQL_BIND_CAPTURE;
- * 包侧统计优先 replay/ 文件, 无文件时读 HTZ_SQL_REPLAY_PKG.BINDS_JSON.
+ * 包侧统计读 replay/ 文件.
  */
 public class BindRefresh {
 
@@ -34,15 +34,15 @@ public class BindRefresh {
     }
 
     /**
-     * @param session  useHtz 时用于读包表; FILE 路径可 null
-     * @param useHtz   true 时无文件包则回落 HTZ_SQL_REPLAY_PKG
+     * @param session  保留参数 (兼容旧调用); 包侧仅读文件
+     * @param useHtz   true 时 filled 计数走 HTZ_GV_SQL_BIND_CAPTURE
      * @param jdbcUser HTZ 表所属登录用户; useHtz 时必填
      */
     public boolean needsRefresh(JdbcSession session, Path outdir, String sqlId,
                                 boolean useHtz, String jdbcUser) {
-        int[] stats = packageSideBindStats(session, outdir, sqlId, useHtz, jdbcUser);
+        int[] stats = packageSideBindStats(outdir, sqlId);
         if (stats == null) {
-            // 无文件包且 (非 HTZ 或包表无行) → 需要刷新/首次导出
+            // 无文件包 → 需要刷新/首次导出
             return true;
         }
         int nBinds = stats[0];
@@ -69,12 +69,12 @@ public class BindRefresh {
     }
 
     /**
-     * @param useHtz   true 时从 HTZ_GV_SQL_BIND_CAPTURE 计 filled; 包侧可回落包表
+     * @param useHtz   true 时从 HTZ_GV_SQL_BIND_CAPTURE 计 filled
      * @param jdbcUser HTZ 路径下表所属登录用户; useHtz=false 时可 null
      */
     public boolean shouldReExport(JdbcSession session, Path outdir, String sqlId,
                                   boolean useHtz, String jdbcUser) throws SQLException {
-        int[] stats = packageSideBindStats(session, outdir, sqlId, useHtz, jdbcUser);
+        int[] stats = packageSideBindStats(outdir, sqlId);
         if (stats == null) {
             return true;
         }
@@ -92,17 +92,13 @@ public class BindRefresh {
     }
 
     /**
-     * 包侧绑定统计: 优先 replay/ 文件; 无文件且 useHtz 时读 HTZ_SQL_REPLAY_PKG.
-     * @return [nBinds, nEmpty]; 两侧皆无则 null
+     * 包侧绑定统计: 读 replay/ 文件.
+     * @return [nBinds, nEmpty]; 无包则 null
      */
-    private int[] packageSideBindStats(JdbcSession session, Path outdir, String sqlId,
-                                       boolean useHtz, String jdbcUser) {
+    private int[] packageSideBindStats(Path outdir, String sqlId) {
         List<Path> pkgs = listPackages(outdir, sqlId);
         if (!pkgs.isEmpty()) {
             return packageBindStats(pkgs.get(0));
-        }
-        if (useHtz && session != null) {
-            return htzPkgBindStats(session.getConnection(), jdbcUser, sqlId);
         }
         return null;
     }
@@ -181,30 +177,6 @@ public class BindRefresh {
         }
     }
 
-    /** 从 HTZ_SQL_REPLAY_PKG 取该 sql_id 一行 BINDS_JSON 统计; 无行返回 null. */
-    private int[] htzPkgBindStats(Connection c, String jdbcUser, String sqlId) {
-        if (c == null || jdbcUser == null || jdbcUser.trim().isEmpty()
-                || sqlId == null || sqlId.isEmpty()) {
-            return null;
-        }
-        String owner = HtzTables.normalizeOwner(jdbcUser);
-        String qn = HtzTables.qname(owner, HtzTables.REPLAY_PKG);
-        String sql = "SELECT binds_json FROM " + qn
-                + " WHERE sql_id = ? ORDER BY child_number, inst_id";
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, sqlId);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) {
-                    return null;
-                }
-                String json = rs.getString(1);
-                return bindStatsFromJson(json);
-            }
-        } catch (SQLException e) {
-            return null;
-        }
-    }
-
     private static int[] bindStatsFromJson(String raw) {
         List<BindValue> binds = JsonBinds.read(raw == null ? "" : raw);
         int empty = 0;
@@ -236,7 +208,7 @@ public class BindRefresh {
         return null;
     }
 
-    /** HTZ_GV_SQL_BIND_CAPTURE 上非空 value_string 计数 (优先 last_captured 谓词). */
+    /** HTZ_GV_SQL_BIND_CAPTURE 上已 capture 行计数 (仅 last_captured; 不做 value 长度判断). */
     private Integer htzFilledCount(Connection c, String jdbcUser, String sqlId) {
         if (jdbcUser == null || jdbcUser.trim().isEmpty()) {
             return null;
@@ -246,7 +218,6 @@ public class BindRefresh {
         String[] queries = new String[] {
             "SELECT COUNT(*) FROM " + qn + " b WHERE b.sql_id = ? AND " + SqlLookup.PRED_B_FILLED,
             "SELECT COUNT(*) FROM " + qn + " b WHERE b.sql_id = ?"
-                    + " AND b.value_string IS NOT NULL AND LENGTH(TRIM(b.value_string)) > 0"
         };
         for (String q : queries) {
             try (PreparedStatement ps = c.prepareStatement(q)) {

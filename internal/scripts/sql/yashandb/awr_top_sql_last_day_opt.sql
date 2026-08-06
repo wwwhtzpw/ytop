@@ -599,7 +599,7 @@ BEGIN
             || 'ROWS_PROCESSED/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS rows_per_exec, fetches/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS rows_per_fetches, '
             || 'APPLICATION_WAIT_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS app_wait_per, CONCURRENCY_WAIT_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS con_wait_per, '
             || 'CLUSTER_WAIT_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS clu_wait_per, USER_IO_WAIT_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS user_io_wait_per, '
-            || 'PLSQL_EXEC_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS plsql_wait_per, OUTLINE_CATEGORY AS outline '
+            || 'PLSQL_EXEC_TIME/DECODE(EXECUTIONS,0,1,EXECUTIONS) AS plsql_wait_per, CAST(NULL AS VARCHAR(64)) AS outline '
             || 'FROM v$sqlarea WHERE sql_id IN (' || in_list_sql_id || ') ORDER BY sql_id';
         EXECUTE IMMEDIATE v_sq BULK COLLECT INTO sqlarea_coll;
         FOR i IN 1..NVL(sqlarea_coll.COUNT,0) LOOP

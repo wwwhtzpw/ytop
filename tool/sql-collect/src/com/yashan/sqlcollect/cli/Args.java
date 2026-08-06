@@ -182,6 +182,10 @@ public class Args {
                 return "limit";
             case 'E':
                 return "explain-plan";
+            case 'U':
+                return "exclude-schemas";
+            case 'u':
+                return "include-schemas";
             default:
                 return null;
         }
@@ -191,7 +195,7 @@ public class Args {
     static boolean shortNeedsValue(char c) {
         return c == 'o' || c == 'l' || c == 'j' || c == 's' || c == 'S' || c == 'i' || c == 'c'
                 || c == 't' || c == 'T' || c == 'p' || c == 'N' || c == 'R' || c == 'C'
-                || c == 'M' || c == 'L';
+                || c == 'M' || c == 'L' || c == 'U' || c == 'u';
     }
 
     /** 需要取值的长选项; flag 类不吞下一个位置参数. */
@@ -210,7 +214,8 @@ public class Args {
                 || "parallel".equals(k) || "sessions".equals(k) || "results-csv".equals(k)
                 || "on-sha-mismatch".equals(k) || "limit".equals(k) || "sort".equals(k)
                 || "run".equals(k) || "csv".equals(k) || "sqlid".equals(k)
-                || "sink".equals(k);
+                || "sink".equals(k) || "exclude-schemas".equals(k) || "include-schemas".equals(k)
+                || "active-session".equals(k);
     }
 
     static boolean isBoolToken(String tok) {
@@ -280,6 +285,17 @@ public class Args {
             return false;
         }
         return optBool("debug", true);
+    }
+
+    /**
+     * 是否扫描 gv$/v$session 做活跃 SQL 置顶.
+     * 默认 true; --active-session false / --no-active-session 关闭.
+     */
+    public boolean resolveActiveSession() {
+        if (flag("no-active-session")) {
+            return false;
+        }
+        return optBool("active-session", true);
     }
 
     /**

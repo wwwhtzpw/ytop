@@ -57,6 +57,7 @@ type Config struct {
 	// Direct execution mode (non-interactive)
 	ExecuteScript string // -f: script file to execute
 	ExecuteSQL    string // -q: SQL query to execute
+	EnterCLI      bool   // -e/--enter: interactive DB CLI session
 	ReadScript    string // -r: read/view script content
 	CopyScript    string // -c: copy script (format: "script dest")
 	FindScript    string // -S: find/search scripts (pattern; empty means all)
@@ -427,6 +428,8 @@ func LoadConfig() (*Config, error) {
 	debugShort := flag.Bool("D", false, "Enable debug mode (short)")
 	executeScript := flag.String("f", "", "Execute script file directly (non-interactive mode)")
 	executeSQL := flag.String("q", "", "Execute SQL query directly (non-interactive mode)")
+	enterCLI := flag.Bool("e", false, "Enter interactive DB CLI (PTY; Unix local/SSH only)")
+	enterCLILong := flag.Bool("enter", false, "Enter interactive DB CLI (PTY; Unix local/SSH only)")
 	readScript := flag.String("r", "", "Read/view script content (non-interactive mode)")
 	copyScript := flag.String("copy", "", "Copy script to destination (format: 'script dest', non-interactive mode)")
 	findScript := flag.String("S", "", "Find/search scripts by pattern (non-interactive mode)")
@@ -540,6 +543,9 @@ func LoadConfig() (*Config, error) {
 	if VisitedAny(visited, "q") && *executeSQL != "" {
 		cfg.ExecuteSQL = *executeSQL
 	}
+	if VisitedAny(visited, "e", "enter") && (*enterCLI || *enterCLILong) {
+		cfg.EnterCLI = true
+	}
 	if VisitedAny(visited, "r") && *readScript != "" {
 		cfg.ReadScript = *readScript
 	}
@@ -612,7 +618,7 @@ func LoadConfig() (*Config, error) {
 
 	// Check if in direct execution mode (including metric mode with -f)
 	isDirectMode := cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
-		cfg.CopyScript != "" || cfg.FindScriptSet
+		cfg.CopyScript != "" || cfg.FindScriptSet || cfg.EnterCLI
 
 	// Handle interval and count from positional arguments
 	// Positional args: [interval] [count]
@@ -653,6 +659,14 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 	recordPositional(args, intervalSpecified, countSpecified)
+
+	// -e/--enter 与其它直连执行模式互斥
+	if cfg.EnterCLI {
+		if cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
+			cfg.CopyScript != "" || cfg.FindScriptSet || cfg.MetricMode {
+			return nil, fmt.Errorf("cannot combine -e/--enter with -f, -q, -r, --copy, -S, or -m/--metric")
+		}
+	}
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -994,8 +1008,8 @@ func DebugLogSummary(cfg *Config) {
 	logger.Debug("  Interval=%d Count=%d InstanceID=%d\n", cfg.Interval, cfg.Count, cfg.InstanceID)
 	logger.Debug("  SessionTopN=%d SessionSortBy=%q SessionDetailTopN=%d EventTopN=%d\n",
 		cfg.SessionTopN, cfg.SessionSortBy, cfg.SessionDetailTopN, cfg.EventTopN)
-	logger.Debug("  DebugMode=%v MetricMode=%v ColorEnabled=%v ShowTimestamp=%v\n",
-		cfg.DebugMode, cfg.MetricMode, cfg.ColorEnabled, cfg.ShowTimestamp)
+	logger.Debug("  DebugMode=%v MetricMode=%v EnterCLI=%v ColorEnabled=%v ShowTimestamp=%v\n",
+		cfg.DebugMode, cfg.MetricMode, cfg.EnterCLI, cfg.ColorEnabled, cfg.ShowTimestamp)
 	if cfg.ExecuteScript != "" {
 		logConfigField("ExecuteScript", cfg.ExecuteScript)
 	}
@@ -1129,7 +1143,7 @@ func (c *Config) Validate() error {
 	// In direct execution mode, interval can be 0
 	// In interactive monitoring mode, interval must be at least 1
 	isDirectMode := c.ExecuteScript != "" || c.ExecuteSQL != "" || c.ReadScript != "" ||
-		c.CopyScript != "" || c.FindScriptSet
+		c.CopyScript != "" || c.FindScriptSet || c.EnterCLI
 
 	if !isDirectMode && c.Interval < 1 {
 		return fmt.Errorf("interval must be at least 1 second")
@@ -1165,7 +1179,7 @@ func PrintUsage() {
 	fmt.Println()
 	fmt.Println("Modes:")
 	fmt.Println("  ytop [options] [interval] [count]             Monitor (default)")
-	fmt.Println("  ytop -f <script>|-q <sql> [options] [int] [n] Script execution")
+	fmt.Println("  ytop -f <script>|-q <sql>|-e [options] [int] [n] Script execution / enter CLI")
 	fmt.Println("  ytop stat|sesstat [options] [interval] [count] Session statistics")
 	fmt.Println("  ytop event|sesevent [options] [interval] [count] Session events")
 	fmt.Println("  ytop ssh [options]                          Configure SSH passwordless login")
@@ -1257,7 +1271,7 @@ func PrintMonitorUsage() {
 func PrintScriptUsage() {
 	fmt.Println("ytop script - Execute scripts and SQL queries")
 	fmt.Println()
-	fmt.Println("Usage:  ytop -f <script>|-q <sql> [options] [interval] [count]")
+	fmt.Println("Usage:  ytop -f <script>|-q <sql>|-e [options] [interval] [count]")
 	fmt.Println()
 	fmt.Println("Execution:")
 	fmt.Println("  -f <script>               Execute script (SQL, OS, C, or Python)")
@@ -1267,6 +1281,7 @@ func PrintScriptUsage() {
 	fmt.Println("                             Full path: /path/to/file or ./file")
 	fmt.Println("                             With args: -f \"memtest.c -i 1 -t 2\"")
 	fmt.Println("  -q <sql>                  Execute SQL query directly")
+	fmt.Println("  -e, --enter                Enter interactive DB CLI (Unix local/SSH PTY)")
 	fmt.Println("  -r <script>               View script content")
 	fmt.Println("  --copy <script> [dest]    Copy script to destination (default: /tmp)")
 	fmt.Println("  -S <pattern>              Search scripts by regex (empty pattern lists all)")
@@ -1306,6 +1321,7 @@ func PrintScriptUsage() {
 	fmt.Println("  ytop -f gv_vm.sql -m 1 10                   # Metric mode, 1s, 10 times")
 	fmt.Println("  ytop -q \"select * from v$version\"            # Execute SQL query once")
 	fmt.Println("  ytop -q \"select count(*) from v$session\" 2 5 # Query every 2s, 5 times")
+	fmt.Println("  ytop -t 10.10.10.170 -s ~/.bashrc -e   # Interactive yasql on remote")
 	fmt.Println("  ytop -t 10.10.10.130 -f iostat.sh           # Execute OS script on remote")
 	fmt.Println("  ytop -f \"hello.c -i 1 -t 2\"               # Compile and run C on target")
 	fmt.Println("  ytop -f \"hello.py --verbose\"                # Run Python script on target")

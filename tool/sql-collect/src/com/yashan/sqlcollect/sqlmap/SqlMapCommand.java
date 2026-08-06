@@ -200,7 +200,10 @@ public class SqlMapCommand {
         Args.helpOpt("-A, --schema-via-alter", "Switch schema via ALTER SESSION");
         Args.helpOpt("-C, --current-schema <user>", "Set current schema before SQL");
         Args.helpOpt("-o, --out <file>", "Output file (export/genbind/genexec/create dry-run)");
-        Args.helpOpt("-b, --bind-file <file>", "Bind values file (one value per line)");
+        Args.helpOpt("-b, --bind-file <arg>", "Binds: <file> | backup | view");
+        Args.helpOpt("", "file=one value per line (or pos|type|val);");
+        Args.helpOpt("", "backup=HTZ_GV_SQL_BIND_CAPTURE; view=gv$/v$sql_bind_capture;");
+        Args.helpOpt("", "backup|view require -s/--src-sql-id");
         System.out.println();
         System.out.println("Create / verify source-target options:");
         Args.helpOpt("-s, --src-sql-id <id>", "Source sql_id from gv$/v$sql");
@@ -208,7 +211,7 @@ public class SqlMapCommand {
         Args.helpOpt("-t, --tgt-sql-id <id>", "Target sql_id from gv$/v$sql");
         Args.helpOpt("-f, --sql-file <file>", "Target SQL text file (mutex with -t;");
         Args.helpOpt("", "also input file for lit2bind)");
-        Args.helpOpt("-n, --map-name <name>", "SQLMAP name (create/show/drop/verify)");
+        Args.helpOpt("-n, --map-name <name>", "SQLMAP name (create/show/drop/verify); create default: map_<sqlId|f_<hash>>_<tsms>_<rnd>");
         Args.helpOpt("-u, --map-user <user>", "SQLMAP user scope (default: ALL)");
         Args.helpOpt("-S, --sql-id <id>", "Lookup SQLMAP by source sql_id (show only)");
         Args.helpOpt("-D, --dry-run", "Print CREATE SQLMAP DDL only; do not execute");
@@ -235,6 +238,7 @@ public class SqlMapCommand {
         System.out.println("  - Source/target should be the same SQL type (e.g. both WITH),");
         System.out.println("    or the engine may raise YAS-04810.");
         System.out.println("  - show/export -S/--sql-id need the cursor still in gv$/v$sql.");
+        System.out.println("  - -b backup|view: only last_captured IS NOT NULL rows.");
         System.out.println();
         System.out.println("Examples:");
         System.out.println("  sql-collect sqlmap create -s <src_id> -t <tgt_id> -n m1 -j jdbc.ini");
@@ -242,11 +246,13 @@ public class SqlMapCommand {
         System.out.println("  sql-collect sqlmap show -n m1 -j jdbc.ini");
         System.out.println("  sql-collect sqlmap show -S <src_id> -j jdbc.ini");
         System.out.println("  sql-collect sqlmap drop -n m1 -j jdbc.ini");
-        System.out.println("  sql-collect sqlmap verify -n m1 -v plan-eq,result -e -b binds.txt -j jdbc.ini");
+        System.out.println("  sql-collect sqlmap verify -n m1 -v result -e -b backup -s <src_id> -j jdbc.ini");
+        System.out.println("  sql-collect sqlmap verify -s <src> -t <tgt> -v result -e -b view -j jdbc.ini");
         System.out.println("  sql-collect sqlmap export -s <src_id> -o src.sql -j jdbc.ini");
-        System.out.println("  sql-collect sqlmap genbind -s <src_id> -o binds.txt -j jdbc.ini");
+        System.out.println("  sql-collect sqlmap genbind -s <src_id> -b backup -o binds.txt -j jdbc.ini");
+        System.out.println("  sql-collect sqlmap genbind -s <src_id> -b view -o binds.txt -j jdbc.ini");
         System.out.println("  sql-collect sqlmap genexec -t <tgt_id> -b binds.txt -e -j jdbc.ini");
-        System.out.println("  sql-collect sqlmap perf -s <src_id> -t <tgt_id> -b binds.txt -e -j jdbc.ini");
+        System.out.println("  sql-collect sqlmap perf -s <src_id> -t <tgt_id> -b backup -e -j jdbc.ini");
         System.out.println("  sql-collect sqlmap lit2bind -f lit.sql -B :bN -o bind.sql -W binds.txt");
         System.out.println("  sql-collect sqlmap list -L 100 -j jdbc.ini");
         System.out.println("  sql-collect sqlmap create -s <src> -t <tgt> -n m1 -D -j jdbc.ini");
