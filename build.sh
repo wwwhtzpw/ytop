@@ -2,7 +2,8 @@
 
 # Build script for ytop - Multi-platform build with anti-decompilation
 # Supports: Linux (amd64, arm64), Windows (amd64, arm64), macOS (amd64, arm64)
-# Also builds tool/sql-collect → internal/scripts/os/sql_collect.jar (before Go embed).
+# Also builds tool/sql-collect → internal/scripts/os/sql_collect.jar
+# and tool/yjdbc → internal/scripts/os/yjdbc.jar (before Go embed).
 
 set -e
 
@@ -19,6 +20,8 @@ BUILD_DIR="build"
 CMD_PATH="./cmd/ytop"
 SQL_COLLECT_DIR="tool/sql-collect"
 SQL_COLLECT_JAR="internal/scripts/os/sql_collect.jar"
+YJDBC_DIR="tool/yjdbc"
+YJDBC_JAR="internal/scripts/os/yjdbc.jar"
 
 # Version information (China timezone)
 TZ_CN="Asia/Shanghai"
@@ -223,6 +226,10 @@ clean_build() {
         print_msg "$YELLOW" "Cleaning ${SQL_COLLECT_DIR}/build..."
         rm -rf "$SQL_COLLECT_DIR/build"
     fi
+    if [ -d "$YJDBC_DIR/build" ]; then
+        print_msg "$YELLOW" "Cleaning ${YJDBC_DIR}/build..."
+        rm -rf "$YJDBC_DIR/build"
+    fi
     print_msg "$GREEN" "✓ Clean complete"
 }
 
@@ -262,14 +269,49 @@ build_sql_collect() {
     fi
 }
 
+# Build yjdbc.jar and install into internal/scripts/os/ (before go:embed)
+build_yjdbc() {
+    print_header "Building yjdbc.jar (Java → OS companion)"
+
+    if [ ! -f "$YJDBC_DIR/build.sh" ]; then
+        print_msg "$YELLOW" "⚠ ${YJDBC_DIR}/build.sh not found; skip yjdbc"
+        return 0
+    fi
+
+    if ! command -v javac &> /dev/null; then
+        print_msg "$YELLOW" "⚠ javac not found on PATH; skip yjdbc.jar rebuild"
+        if [ -f "$YJDBC_JAR" ]; then
+            print_msg "$BLUE" "  Keeping existing: ${YJDBC_JAR}"
+        else
+            print_msg "$RED" "  Missing ${YJDBC_JAR}; ytop -E will fail until jar is built"
+        fi
+        return 0
+    fi
+
+    print_msg "$YELLOW" "Running ${YJDBC_DIR}/build.sh ..."
+    if (cd "$YJDBC_DIR" && bash ./build.sh); then
+        if [ -f "$YJDBC_JAR" ]; then
+            local jar_sz
+            jar_sz=$(du -h "$YJDBC_JAR" | cut -f1)
+            print_msg "$GREEN" "✓ yjdbc.jar installed (${jar_sz}): ${YJDBC_JAR}"
+        else
+            print_msg "$RED" "✗ yjdbc build finished but jar missing: ${YJDBC_JAR}"
+            return 1
+        fi
+    else
+        print_msg "$RED" "✗ yjdbc build failed"
+        return 1
+    fi
+}
+
 # Show help
 show_help() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
 Build ytop for multiple platforms with anti-decompilation protection.
-Also rebuilds sql_collect.jar (tool/sql-collect) into ${SQL_COLLECT_JAR}
-before Go compile so go:embed picks up the latest companion jar.
+Also rebuilds sql_collect.jar and yjdbc.jar into internal/scripts/os/
+before Go compile so go:embed picks up the latest companion jars.
 
 OPTIONS:
     -h, --help              Show this help message
@@ -281,18 +323,22 @@ OPTIONS:
     --current               Build for current platform only
     --skip-sql-collect      Do not rebuild sql_collect.jar
     --sql-collect-only      Only rebuild sql_collect.jar (no Go binaries)
+    --skip-yjdbc           Do not rebuild yjdbc.jar
+    --yjdbc-only            Only rebuild yjdbc.jar (no Go binaries)
 
 EXAMPLES:
-    $0                      # sql_collect.jar + all platform ytop binaries
+    $0                      # jars + all platform ytop binaries
     $0 --clean              # Clean and build all
-    $0 --linux              # sql_collect.jar + Linux ytop only
-    $0 --current            # sql_collect.jar + current platform ytop
-    $0 --sql-collect-only   # Only Java companion jar
-    $0 --skip-sql-collect   # Go binaries only (keep existing jar)
+    $0 --linux              # jars + Linux ytop only
+    $0 --current            # jars + current platform ytop
+    $0 --sql-collect-only   # Only sql_collect companion jar
+    $0 --yjdbc-only         # Only yjdbc companion jar
+    $0 --skip-sql-collect   # Go binaries only (keep existing sql_collect jar)
 
 OUTPUT:
     Go binaries:     ${BUILD_DIR}/${BINARY_NAME}_<os>_<arch>[.exe]
-    Companion jar:   ${SQL_COLLECT_JAR}
+    Companion jars:  ${SQL_COLLECT_JAR}
+                     ${YJDBC_JAR}
 
 PLATFORMS:
     Linux:   amd64, arm64
@@ -444,6 +490,8 @@ main() {
     local build_target="all"
     local skip_sql_collect=false
     local sql_collect_only=false
+    local skip_yjdbc=false
+    local yjdbc_only=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -483,6 +531,14 @@ main() {
                 sql_collect_only=true
                 shift
                 ;;
+            --skip-yjdbc)
+                skip_yjdbc=true
+                shift
+                ;;
+            --yjdbc-only)
+                yjdbc_only=true
+                shift
+                ;;
             *)
                 print_msg "$RED" "Unknown option: $1"
                 show_help
@@ -505,21 +561,41 @@ main() {
         mkdir -p "$BUILD_DIR"
     fi
 
-    # sql_collect.jar first so go:embed sees the updated companion
+    # Companion jars first so go:embed sees the updated files
     if [ "$skip_sql_collect" = true ]; then
         print_msg "$YELLOW" "Skipping sql_collect.jar rebuild (--skip-sql-collect)"
         if [ -f "$SQL_COLLECT_JAR" ]; then
             print_msg "$BLUE" "  Using existing: ${SQL_COLLECT_JAR}"
         fi
         echo ""
+    elif [ "$yjdbc_only" = true ]; then
+        : # skip sql_collect when only yjdbc requested
     else
         build_sql_collect
+        echo ""
+    fi
+
+    if [ "$skip_yjdbc" = true ]; then
+        print_msg "$YELLOW" "Skipping yjdbc.jar rebuild (--skip-yjdbc)"
+        if [ -f "$YJDBC_JAR" ]; then
+            print_msg "$BLUE" "  Using existing: ${YJDBC_JAR}"
+        fi
+        echo ""
+    elif [ "$sql_collect_only" = true ]; then
+        : # skip yjdbc when only sql_collect requested
+    else
+        build_yjdbc
         echo ""
     fi
 
     if [ "$sql_collect_only" = true ]; then
         show_summary
         print_msg "$GREEN" "✓ sql_collect-only build complete!"
+        exit 0
+    fi
+    if [ "$yjdbc_only" = true ]; then
+        show_summary
+        print_msg "$GREEN" "✓ yjdbc-only build complete!"
         exit 0
     fi
 

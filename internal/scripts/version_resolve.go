@@ -189,10 +189,27 @@ func bestConstraintScore(constraints []versionConstraint, dbVersion string) int 
 
 // CurrentDBVersion is the active database version for script resolution.
 // Set from --db-version or auto-detected via DB CLI -v.
+// JDBC (-E) 默认不自动探测, 仅在显式 -V/--db-version 时设置.
 var CurrentDBVersion string
+
+// CurrentSQLEngine 脚本执行引擎: "yasql"(默认) 或 "yjdbc".
+// 用于解析 foo_yjdbc.sql / foo_yasql.sql 等引擎变体; 空串等同 yasql.
+var CurrentSQLEngine string
 
 // LastResolvedScript records the physical script chosen for the most recent lookup.
 var LastResolvedScript string
+
+// NormalizeSQLEngine 归一化引擎名.
+func NormalizeSQLEngine(engine string) string {
+	switch strings.ToLower(strings.TrimSpace(engine)) {
+	case "yjdbc", "jdbc":
+		return "yjdbc"
+	case "yasql", "":
+		return "yasql"
+	default:
+		return strings.ToLower(strings.TrimSpace(engine))
+	}
+}
 
 type scriptVersionMeta struct {
 	FileName     string
@@ -208,6 +225,7 @@ type scriptCandidate struct {
 }
 
 // ResolveSQLScriptName picks the best physical SQL script for a logical name and DB version.
+// 仅考虑无引擎后缀的变体 (foo.sql / foo_23.5.sql); 引擎变体见 ResolveSQLScriptNameForEngine.
 func ResolveSQLScriptName(logicalName, dbVersion string) (string, error) {
 	logicalName = strings.TrimSpace(logicalName)
 	dbVersion = strings.TrimSpace(dbVersion)
@@ -217,7 +235,7 @@ func ResolveSQLScriptName(logicalName, dbVersion string) (string, error) {
 	if dbVersion == "" {
 		return logicalName, nil
 	}
-	if hasVersionSuffix(logicalName) {
+	if _, _, ver := parseScriptNameParts(logicalName); ver != "" {
 		return logicalName, nil
 	}
 
@@ -226,10 +244,59 @@ func ResolveSQLScriptName(logicalName, dbVersion string) (string, error) {
 	if err != nil {
 		return logicalName, err
 	}
-	if len(candidates) == 0 {
+	return pickBestVersionCandidate(candidates, logicalName, dbVersion)
+}
+
+// ResolveSQLScriptNameForEngine 按引擎 + 可选版本解析物理脚本名.
+// 优先级: foo_<engine>[_ver].sql → (回退) foo[_ver].sql.
+// 请求名已含引擎或版本后缀时原样返回.
+func ResolveSQLScriptNameForEngine(logicalName, engine, dbVersion string) (string, error) {
+	logicalName = strings.TrimSpace(logicalName)
+	if logicalName == "" {
+		return "", fmt.Errorf("empty script name")
+	}
+	_, reqEng, reqVer := parseScriptNameParts(logicalName)
+	if reqEng != "" || reqVer != "" {
 		return logicalName, nil
 	}
 
+	eng := NormalizeSQLEngine(engine)
+	base := strings.TrimSuffix(logicalName, filepath.Ext(logicalName))
+	dbVersion = strings.TrimSpace(dbVersion)
+
+	if eng == "yjdbc" || eng == "yasql" {
+		engCands, err := listSQLScriptEngineCandidates(base, eng)
+		if err == nil && len(engCands) > 0 {
+			if dbVersion != "" {
+				if picked, perr := pickBestVersionCandidate(engCands, logicalName, dbVersion); perr == nil {
+					return picked, nil
+				}
+				// 引擎变体无一匹配该版本时, 若存在无版本引擎文件则用之, 否则回退默认族
+				for _, c := range engCands {
+					if c.meta.SuffixVer == "" {
+						return c.meta.FileName, nil
+					}
+				}
+			} else {
+				for _, c := range engCands {
+					if c.meta.SuffixVer == "" {
+						return c.meta.FileName, nil
+					}
+				}
+			}
+		}
+	}
+
+	if dbVersion != "" {
+		return ResolveSQLScriptName(logicalName, dbVersion)
+	}
+	return logicalName, nil
+}
+
+func pickBestVersionCandidate(candidates []scriptCandidate, logicalName, dbVersion string) (string, error) {
+	if len(candidates) == 0 {
+		return logicalName, nil
+	}
 	var matched []scoredCandidate
 	for _, c := range candidates {
 		if !scriptMatchesVersion(c.meta, dbVersion) {
@@ -243,7 +310,6 @@ func ResolveSQLScriptName(logicalName, dbVersion string) (string, error) {
 	if len(matched) == 0 {
 		return logicalName, fmt.Errorf("no script variant of %q matches DB version %q", logicalName, dbVersion)
 	}
-
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].score != matched[j].score {
 			return matched[i].score > matched[j].score
@@ -259,26 +325,42 @@ type scoredCandidate struct {
 }
 
 func hasVersionSuffix(filename string) bool {
-	_, ver := parseScriptFilename(filename)
+	_, _, ver := parseScriptNameParts(filename)
 	return ver != ""
 }
 
+// parseScriptFilename 兼容旧调用: 逻辑基名含引擎后缀 (we_yjdbc), 版本单独返回.
 func parseScriptFilename(filename string) (logicalBase, suffixVersion string) {
+	base, eng, ver := parseScriptNameParts(filename)
+	if eng != "" {
+		base = base + "_" + eng
+	}
+	return base, ver
+}
+
+// parseScriptNameParts 拆分 foo.sql / foo_23.5.sql / foo_yjdbc.sql / foo_yjdbc_23.5.sql.
+func parseScriptNameParts(filename string) (logicalBase, engine, version string) {
 	ext := filepath.Ext(filename)
 	name := strings.TrimSuffix(filename, ext)
-	idx := strings.LastIndex(name, "_")
-	if idx <= 0 {
-		return name, ""
+	if idx := strings.LastIndex(name, "_"); idx > 0 {
+		suf := name[idx+1:]
+		if looksLikeVersion(suf) {
+			version = suf
+			name = name[:idx]
+		}
 	}
-	suffix := name[idx+1:]
-	if !looksLikeVersion(suffix) {
-		return name, ""
+	switch {
+	case strings.HasSuffix(name, "_yjdbc"):
+		return strings.TrimSuffix(name, "_yjdbc"), "yjdbc", version
+	case strings.HasSuffix(name, "_yasql"):
+		return strings.TrimSuffix(name, "_yasql"), "yasql", version
+	default:
+		return name, "", version
 	}
-	return name[:idx], suffix
 }
 
 func parseScriptVersionMeta(filename string, content []byte) scriptVersionMeta {
-	base, suffix := parseScriptFilename(filename)
+	base, _, suffix := parseScriptNameParts(filename)
 	fields := parseScriptHeaderFields(content)
 	logical := fields.FileName
 	if logical == "" {
@@ -324,12 +406,22 @@ func scoreScriptMatch(meta scriptVersionMeta, dbVersion string) int {
 }
 
 func listSQLScriptCandidates(logicalBase string) ([]scriptCandidate, error) {
+	// 默认族: 无引擎后缀
+	return listSQLScriptFiltered(logicalBase, "")
+}
+
+func listSQLScriptEngineCandidates(logicalBase, engine string) ([]scriptCandidate, error) {
+	return listSQLScriptFiltered(logicalBase, engine)
+}
+
+// listSQLScriptFiltered 按逻辑基名 + 引擎过滤; engine 空表示仅默认族 (无 _yjdbc/_yasql).
+func listSQLScriptFiltered(logicalBase, engine string) ([]scriptCandidate, error) {
 	seen := make(map[string]struct{})
 	var out []scriptCandidate
 
 	add := func(filename string, content []byte) {
-		base, _ := parseScriptFilename(filename)
-		if base != logicalBase {
+		base, eng, _ := parseScriptNameParts(filename)
+		if base != logicalBase || eng != engine {
 			return
 		}
 		if _, ok := seen[filename]; ok {

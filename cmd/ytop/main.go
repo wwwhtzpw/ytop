@@ -122,6 +122,25 @@ func runMonitor() {
 
 	// Set script DB type and resolve DB version when possible without connecting.
 	scripts.CurrentDBType = cfg.DBType
+	scripts.CurrentSQLEngine = "yasql"
+
+	// -E: 本机 JDBC; 脚本引擎=yjdbc; 版本仅认显式 -V (不跑本机 yasql -v 自动探测)
+	if cfg.JdbcEnter {
+		scripts.CurrentSQLEngine = "yjdbc"
+		if v := strings.TrimSpace(cfg.DBVersion); v != "" {
+			scripts.CurrentDBVersion = v
+		}
+		code, err := executor.NewExecutor(cfg, nil).EnterJdbcShell()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+			os.Exit(code)
+		}
+		os.Exit(code)
+	}
+
 	connector.InitDBVersionFromConfig(context.Background(), cfg)
 
 	// Check if only finding scripts or reading script content (no database connection needed)
@@ -142,7 +161,7 @@ func runMonitor() {
 	}
 
 	// Check monitor mode DB type support before connecting
-	isDirectMode := cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.CopyScript != "" || cfg.MetricMode || cfg.EnterCLI
+	isDirectMode := cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.CopyScript != "" || cfg.MetricMode || cfg.EnterCLI || cfg.JdbcEnter
 	if !isDirectMode && cfg.DBType != "yashandb" {
 		fmt.Fprintf(os.Stderr, "Interactive monitor mode only supports YashanDB. Support for other database types is coming soon.\n")
 		os.Exit(1)

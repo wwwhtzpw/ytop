@@ -76,10 +76,11 @@ func GetSQLScript(name string) (string, error) {
 
 	resolved := name
 	LastResolvedScript = name
-	if strings.TrimSpace(CurrentDBVersion) != "" && !hasVersionSuffix(name) {
-		if picked, err := ResolveSQLScriptName(name, CurrentDBVersion); err == nil {
+	// 逻辑名: 按引擎变体 (_yjdbc/_yasql) + 可选版本解析; 请求名已带引擎/版本后缀则不改写
+	if _, engPart, verPart := parseScriptNameParts(name); engPart == "" && verPart == "" {
+		if picked, err := ResolveSQLScriptNameForEngine(name, CurrentSQLEngine, CurrentDBVersion); err == nil {
 			resolved = picked
-		} else if !sqlScriptExists(name) {
+		} else if strings.TrimSpace(CurrentDBVersion) != "" && !sqlScriptExists(name) {
 			return "", err
 		}
 	}

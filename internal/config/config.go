@@ -58,10 +58,20 @@ type Config struct {
 	ExecuteScript string // -f: script file to execute
 	ExecuteSQL    string // -q: SQL query to execute
 	EnterCLI      bool   // -e/--enter: interactive DB CLI session
-	ReadScript    string // -r: read/view script content
-	CopyScript    string // -c: copy script (format: "script dest")
-	FindScript    string // -S: find/search scripts (pattern; empty means all)
-	FindScriptSet bool   // true when -S was passed on the command line
+	JdbcEnter     bool   // -E/--jdbc-enter: local JDBC shell (yjdbc)
+	JdbcJar       string // -J/--jdbc-jar: JDBC driver jar
+	DbName        string // --dbname for JDBC URL (default yasdb when -E)
+	// Jdbc* 仅由 -E 从 CLI 填入, 禁止用 ini 的 ssh_* 冒充
+	JdbcHost        string
+	JdbcPort        int
+	JdbcUser        string
+	JdbcPassword    string
+	JdbcPasswordSet bool   // visited -p/--ssh-password (允许空串)
+	JdbcPortSet     bool   // visited -P/--port
+	ReadScript      string // -r: read/view script content
+	CopyScript      string // -c: copy script (format: "script dest")
+	FindScript      string // -S: find/search scripts (pattern; empty means all)
+	FindScriptSet   bool   // true when -S was passed on the command line
 
 	// Metric mode (delta/per-second calculation)
 	MetricMode bool // --metric: enable metric collection with delta calculation
@@ -430,6 +440,11 @@ func LoadConfig() (*Config, error) {
 	executeSQL := flag.String("q", "", "Execute SQL query directly (non-interactive mode)")
 	enterCLI := flag.Bool("e", false, "Enter interactive DB CLI (PTY; Unix local/SSH only)")
 	enterCLILong := flag.Bool("enter", false, "Enter interactive DB CLI (PTY; Unix local/SSH only)")
+	jdbcEnter := flag.Bool("E", false, "Enter local JDBC shell (yjdbc; control host only)")
+	jdbcEnterLong := flag.Bool("jdbc-enter", false, "Enter local JDBC shell (yjdbc; control host only)")
+	jdbcJar := flag.String("jdbc-jar", "", "JDBC driver jar (optional with -E if embedded)")
+	jdbcJarShort := flag.String("J", "", "JDBC driver jar (short; optional with -E if embedded)")
+	dbName := flag.String("dbname", "", "Database name for JDBC URL (default yasdb with -E)")
 	readScript := flag.String("r", "", "Read/view script content (non-interactive mode)")
 	copyScript := flag.String("copy", "", "Copy script to destination (format: 'script dest', non-interactive mode)")
 	findScript := flag.String("S", "", "Find/search scripts by pattern (non-interactive mode)")
@@ -546,6 +561,18 @@ func LoadConfig() (*Config, error) {
 	if VisitedAny(visited, "e", "enter") && (*enterCLI || *enterCLILong) {
 		cfg.EnterCLI = true
 	}
+	if VisitedAny(visited, "E", "jdbc-enter") && (*jdbcEnter || *jdbcEnterLong) {
+		cfg.JdbcEnter = true
+	}
+	if VisitedAny(visited, "jdbc-jar") && *jdbcJar != "" {
+		cfg.JdbcJar = *jdbcJar
+	}
+	if VisitedAny(visited, "J") && *jdbcJarShort != "" {
+		cfg.JdbcJar = *jdbcJarShort
+	}
+	if VisitedAny(visited, "dbname") && *dbName != "" {
+		cfg.DbName = *dbName
+	}
 	if VisitedAny(visited, "r") && *readScript != "" {
 		cfg.ReadScript = *readScript
 	}
@@ -604,8 +631,15 @@ func LoadConfig() (*Config, error) {
 
 	cfg.ApplyDBTypeConnectDefaults()
 
+	// -E: 从 CLI 填 JDBC 快照 (禁止 ini ssh_*), 并强制 local, 禁止自动切 ssh
+	if cfg.JdbcEnter {
+		fillJdbcEnterCLI(cfg, visited, sshHost, sshHostShort, port, portShort,
+			sshUser, sshUserShort, sshPassword, sshPasswordShort)
+		cfg.ConnectionMode = "local"
+	}
+
 	// Auto-detect connection mode when not explicitly set on CLI or in INI
-	if !VisitedAny(visited, "mode") && !cfg.iniConnectionModeSet && cfg.ConnectionMode == "local" && cfg.SSHHost != "" {
+	if !cfg.JdbcEnter && !VisitedAny(visited, "mode") && !cfg.iniConnectionModeSet && cfg.ConnectionMode == "local" && cfg.SSHHost != "" {
 		cfg.ConnectionMode = "ssh"
 	}
 
@@ -618,7 +652,7 @@ func LoadConfig() (*Config, error) {
 
 	// Check if in direct execution mode (including metric mode with -f)
 	isDirectMode := cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
-		cfg.CopyScript != "" || cfg.FindScriptSet || cfg.EnterCLI
+		cfg.CopyScript != "" || cfg.FindScriptSet || cfg.EnterCLI || cfg.JdbcEnter
 
 	// Handle interval and count from positional arguments
 	// Positional args: [interval] [count]
@@ -662,9 +696,22 @@ func LoadConfig() (*Config, error) {
 
 	// -e/--enter 与其它直连执行模式互斥
 	if cfg.EnterCLI {
-		if cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
+		if cfg.JdbcEnter || cfg.ExecuteScript != "" || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
 			cfg.CopyScript != "" || cfg.FindScriptSet || cfg.MetricMode {
-			return nil, fmt.Errorf("cannot combine -e/--enter with -f, -q, -r, --copy, -S, or -m/--metric")
+			return nil, fmt.Errorf("cannot combine -e/--enter with -E, -f, -q, -r, --copy, -S, or -m/--metric")
+		}
+	}
+	// -E/--jdbc-enter: 允许搭配 -f SQL 脚本 (经 JDBC @ 执行); 其它动作仍互斥
+	if cfg.JdbcEnter {
+		if cfg.EnterCLI || cfg.ExecuteSQL != "" || cfg.ReadScript != "" ||
+			cfg.CopyScript != "" || cfg.FindScriptSet || cfg.MetricMode {
+			return nil, fmt.Errorf("cannot combine -E/--jdbc-enter with -e, -q, -r, --copy, -S, or -m/--metric")
+		}
+		if cfg.ExecuteScript != "" {
+			name := firstCLIToken(cfg.ExecuteScript)
+			if !strings.HasSuffix(strings.ToLower(name), ".sql") {
+				return nil, fmt.Errorf("-E -f only supports SQL scripts (.sql), got %q", name)
+			}
 		}
 	}
 
@@ -1008,8 +1055,8 @@ func DebugLogSummary(cfg *Config) {
 	logger.Debug("  Interval=%d Count=%d InstanceID=%d\n", cfg.Interval, cfg.Count, cfg.InstanceID)
 	logger.Debug("  SessionTopN=%d SessionSortBy=%q SessionDetailTopN=%d EventTopN=%d\n",
 		cfg.SessionTopN, cfg.SessionSortBy, cfg.SessionDetailTopN, cfg.EventTopN)
-	logger.Debug("  DebugMode=%v MetricMode=%v EnterCLI=%v ColorEnabled=%v ShowTimestamp=%v\n",
-		cfg.DebugMode, cfg.MetricMode, cfg.EnterCLI, cfg.ColorEnabled, cfg.ShowTimestamp)
+	logger.Debug("  DebugMode=%v MetricMode=%v EnterCLI=%v JdbcEnter=%v ColorEnabled=%v ShowTimestamp=%v\n",
+		cfg.DebugMode, cfg.MetricMode, cfg.EnterCLI, cfg.JdbcEnter, cfg.ColorEnabled, cfg.ShowTimestamp)
 	if cfg.ExecuteScript != "" {
 		logConfigField("ExecuteScript", cfg.ExecuteScript)
 	}
@@ -1077,14 +1124,66 @@ func stripDebugFlagsFromArgs(args []string, cfg *Config) []string {
 }
 
 // Validate checks if the configuration is valid
+// fillJdbcEnterCLI 仅从 CLI visited flag 写入 Jdbc* 快照 (不用 ini 的 SSH*).
+func fillJdbcEnterCLI(cfg *Config, visited map[string]bool,
+	sshHost, sshHostShort *string, port, portShort *int,
+	sshUser, sshUserShort, sshPassword, sshPasswordShort *string) {
+	if VisitedAny(visited, "ssh-host") {
+		cfg.JdbcHost = *sshHost
+	}
+	if VisitedAny(visited, "t") {
+		cfg.JdbcHost = *sshHostShort
+	}
+	if VisitedAny(visited, "port") {
+		cfg.JdbcPort = *port
+		cfg.JdbcPortSet = true
+	}
+	if VisitedAny(visited, "P") {
+		cfg.JdbcPort = *portShort
+		cfg.JdbcPortSet = true
+	}
+	if VisitedAny(visited, "ssh-user") {
+		cfg.JdbcUser = *sshUser
+	}
+	if VisitedAny(visited, "u") {
+		cfg.JdbcUser = *sshUserShort
+	}
+	if VisitedAny(visited, "ssh-password") {
+		cfg.JdbcPassword = *sshPassword
+		cfg.JdbcPasswordSet = true
+	}
+	if VisitedAny(visited, "p") {
+		cfg.JdbcPassword = *sshPasswordShort
+		cfg.JdbcPasswordSet = true
+	}
+}
+
 func (c *Config) Validate() error {
 	if c.ConnectionMode != "local" && c.ConnectionMode != "ssh" {
 		return fmt.Errorf("connection_mode must be 'local' or 'ssh'")
 	}
 
+	if c.JdbcEnter {
+		if c.JdbcHost == "" || !c.JdbcPortSet || c.JdbcPort <= 0 ||
+			c.JdbcUser == "" || !c.JdbcPasswordSet {
+			return fmt.Errorf("-E requires -t <db-host>, -P <db-port>, -u <user>, and -p <password> (-J optional if driver embedded)")
+		}
+		// 显式 -J 路径在此校验; 未传则运行时 ResolveJdbcDriverJar (embed / JDBC_JAR)
+		if strings.TrimSpace(c.JdbcJar) != "" {
+			st, err := os.Stat(c.JdbcJar)
+			if err != nil || st.IsDir() {
+				return fmt.Errorf("JDBC driver jar not found: %s", c.JdbcJar)
+			}
+		}
+		if c.DbName == "" {
+			c.DbName = "yasdb"
+		}
+	}
+
 	// YashanDB is not supported on Windows (local or explicit target-os=windows).
 	// SSH auto-detection is done later in Connect(); block only the explicit case here.
-	if c.DBType == "yashandb" {
+	// -E 本机 JDBC 不依赖本机 yasql, 跳过 YashanDB/Windows 本地限制.
+	if c.DBType == "yashandb" && !c.JdbcEnter {
 		if c.ConnectionMode == "local" && isLocalWindows() {
 			return fmt.Errorf(
 				"YashanDB is not supported on Windows.\n" +
@@ -1097,7 +1196,7 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.ConnectionMode == "ssh" {
+	if c.ConnectionMode == "ssh" && !c.JdbcEnter {
 		if c.SSHHost == "" {
 			return fmt.Errorf("ssh_host is required when connection_mode is 'ssh'")
 		}
@@ -1143,7 +1242,7 @@ func (c *Config) Validate() error {
 	// In direct execution mode, interval can be 0
 	// In interactive monitoring mode, interval must be at least 1
 	isDirectMode := c.ExecuteScript != "" || c.ExecuteSQL != "" || c.ReadScript != "" ||
-		c.CopyScript != "" || c.FindScriptSet || c.EnterCLI
+		c.CopyScript != "" || c.FindScriptSet || c.EnterCLI || c.JdbcEnter
 
 	if !isDirectMode && c.Interval < 1 {
 		return fmt.Errorf("interval must be at least 1 second")
@@ -1154,6 +1253,15 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// firstCLIToken 取 -f 等参数的首 token (脚本名).
+func firstCLIToken(s string) string {
+	fields := strings.Fields(strings.TrimSpace(s))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // checkSSHCommand checks if ssh command is available
@@ -1179,7 +1287,7 @@ func PrintUsage() {
 	fmt.Println()
 	fmt.Println("Modes:")
 	fmt.Println("  ytop [options] [interval] [count]             Monitor (default)")
-	fmt.Println("  ytop -f <script>|-q <sql>|-e [options] [int] [n] Script execution / enter CLI")
+	fmt.Println("  ytop -f <script>|-q <sql> [options] [int] [n]   Script / SQL execution")
 	fmt.Println("  ytop stat|sesstat [options] [interval] [count] Session statistics")
 	fmt.Println("  ytop event|sesevent [options] [interval] [count] Session events")
 	fmt.Println("  ytop ssh [options]                          Configure SSH passwordless login")
@@ -1271,7 +1379,7 @@ func PrintMonitorUsage() {
 func PrintScriptUsage() {
 	fmt.Println("ytop script - Execute scripts and SQL queries")
 	fmt.Println()
-	fmt.Println("Usage:  ytop -f <script>|-q <sql>|-e [options] [interval] [count]")
+	fmt.Println("Usage:  ytop -f <script>|-q <sql> [options] [interval] [count]")
 	fmt.Println()
 	fmt.Println("Execution:")
 	fmt.Println("  -f <script>               Execute script (SQL, OS, C, or Python)")
@@ -1281,7 +1389,6 @@ func PrintScriptUsage() {
 	fmt.Println("                             Full path: /path/to/file or ./file")
 	fmt.Println("                             With args: -f \"memtest.c -i 1 -t 2\"")
 	fmt.Println("  -q <sql>                  Execute SQL query directly")
-	fmt.Println("  -e, --enter                Enter interactive DB CLI (Unix local/SSH PTY)")
 	fmt.Println("  -r <script>               View script content")
 	fmt.Println("  --copy <script> [dest]    Copy script to destination (default: /tmp)")
 	fmt.Println("  -S <pattern>              Search scripts by regex (empty pattern lists all)")
@@ -1321,7 +1428,6 @@ func PrintScriptUsage() {
 	fmt.Println("  ytop -f gv_vm.sql -m 1 10                   # Metric mode, 1s, 10 times")
 	fmt.Println("  ytop -q \"select * from v$version\"            # Execute SQL query once")
 	fmt.Println("  ytop -q \"select count(*) from v$session\" 2 5 # Query every 2s, 5 times")
-	fmt.Println("  ytop -t 10.10.10.170 -s ~/.bashrc -e   # Interactive yasql on remote")
 	fmt.Println("  ytop -t 10.10.10.130 -f iostat.sh           # Execute OS script on remote")
 	fmt.Println("  ytop -f \"hello.c -i 1 -t 2\"               # Compile and run C on target")
 	fmt.Println("  ytop -f \"hello.py --verbose\"                # Run Python script on target")
