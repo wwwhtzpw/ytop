@@ -25,6 +25,8 @@ public final class Repl {
 
     public int run() {
         SqlExecutor executor = new SqlExecutor(session, out, err);
+        executor.attachAsInterruptTarget();
+        SqlExecutor.installInterruptHandler(err);
         ClientCommands client = new ClientCommands(session, executor, out, err);
 
         String script = session.config().scriptPath;
@@ -53,7 +55,14 @@ public final class Repl {
                     break;
                 }
                 String prompt = buf.length() == 0 ? "YJDBC> " : "     > ";
-                String line = lineSource.readLine(prompt);
+                String line;
+                try {
+                    line = lineSource.readLine(prompt);
+                } catch (LineSource.LineInterruptedException interrupted) {
+                    // 提示符 Ctrl+C: 丢弃未提交缓冲, 回到 YJDBC>
+                    buf.setLength(0);
+                    continue;
+                }
                 if (line == null) {
                     out.println();
                     break;
@@ -168,7 +177,9 @@ public final class Repl {
         }
         boolean ok = executor.execute(expanded.sql, expanded.binds, spec.verticalOnce);
         if (!ok) {
-            client.onSqlError();
+            if (!executor.consumeCancelFailure()) {
+                client.onSqlError();
+            }
         } else {
             client.rememberSql(expanded.sql);
         }

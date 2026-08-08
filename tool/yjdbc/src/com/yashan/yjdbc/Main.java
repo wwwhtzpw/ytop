@@ -56,9 +56,11 @@ public final class Main {
         System.out.println();
         Args.usage();
         System.out.println();
-        System.out.println("Client: @/@@/START COLUMN DEFINE ACCEPT DESC PROMPT SPOOL SHOW CLEAR EXEC");
-        System.out.println("        WHENEVER EXIT/QUIT VARIABLE PRINT TTITLE BTITLE BREAK COMPUTE");
-        System.out.println("        LIST RUN CHANGE DEL APPEND INPUT GET SAVE PAUSE HOST CONNECT");
+        System.out.println("Client: @/@@/START ?path #path COLUMN DEFINE ACCEPT DESC PROMPT SPOOL");
+        System.out.println("        SHOW CLEAR EXEC WHENEVER EXIT/QUIT VARIABLE PRINT TTITLE BTITLE");
+        System.out.println("        BREAK COMPUTE LIST RUN CHANGE DEL APPEND INPUT GET SAVE PAUSE");
+        System.out.println("        HOST CONNECT");
+        System.out.println("?path = view script; #path = edit temp copy then run if changed");
         System.out.println("COLUMN: FORMAT An|999 NOPRINT JUSTIFY TRUNCATED|WRAPPED NEW_VALUE OLD_VALUE");
         System.out.println("SET: ECHO FEEDBACK HEADING PAGESIZE LINESIZE TIMING VERIFY DEFINE ESCAPE");
         System.out.println("     NULL TERMOUT AUTOCOMMIT SERVEROUTPUT VERTICAL DISPLAY BINDVAR HOST");

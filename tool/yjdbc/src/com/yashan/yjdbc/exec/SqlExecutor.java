@@ -18,6 +18,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -25,14 +27,108 @@ import java.util.regex.Pattern;
  * 执行 SQL, 按 Oracle sqlplus 风格打印结果.
  */
 public final class SqlExecutor {
+    /** 当前可被 Ctrl+C / SIGINT 取消的执行器. */
+    private static final AtomicReference<SqlExecutor> INTERRUPT_TARGET =
+            new AtomicReference<SqlExecutor>();
+
     private final JdbcSession session;
     private final PrintStream out;
     private final PrintStream err;
+    private final AtomicReference<Statement> activeStatement =
+            new AtomicReference<Statement>();
+    private final AtomicBoolean cancelledByInterrupt = new AtomicBoolean(false);
+    /** 最近一次 execute 失败是否因 Ctrl+C 取消 (供 REPL 跳过 WHENEVER EXIT). */
+    private final AtomicBoolean lastFailureWasCancel = new AtomicBoolean(false);
 
     public SqlExecutor(JdbcSession session, PrintStream out, PrintStream err) {
         this.session = session;
         this.out = out;
         this.err = err;
+    }
+
+    /** 注册为 SIGINT 取消目标 (REPL 启动时调用). */
+    public void attachAsInterruptTarget() {
+        INTERRUPT_TARGET.set(this);
+    }
+
+    /**
+     * 安装 INT 信号: 有活动 Statement 则 cancel, 不退出进程.
+     * 提示符下 Ctrl+C 由 JLine UserInterrupt 处理 (见 LineSource).
+     * 经反射调用 sun.misc.Signal, 避免新 JDK 编译期依赖 sun.*.
+     */
+    public static void installInterruptHandler(final PrintStream err) {
+        try {
+            Class<?> signalCl = Class.forName("sun.misc.Signal");
+            Class<?> handlerCl = Class.forName("sun.misc.SignalHandler");
+            Object signal = signalCl.getConstructor(String.class).newInstance("INT");
+            Object handler = java.lang.reflect.Proxy.newProxyInstance(
+                    handlerCl.getClassLoader(),
+                    new Class<?>[]{handlerCl},
+                    new java.lang.reflect.InvocationHandler() {
+                        @Override
+                        public Object invoke(Object proxy, java.lang.reflect.Method method,
+                                             Object[] args) {
+                            if (method.getName().equals("handle")) {
+                                SqlExecutor ex = INTERRUPT_TARGET.get();
+                                if (ex != null && ex.cancelActiveStatement()) {
+                                    try {
+                                        if (err != null) {
+                                            err.println();
+                                            err.println("SQL cancelled.");
+                                            err.flush();
+                                        }
+                                    } catch (Exception ignored) {
+                                        // ignore
+                                    }
+                                }
+                            }
+                            return null;
+                        }
+                    });
+            signalCl.getMethod("handle", signalCl, handlerCl).invoke(null, signal, handler);
+        } catch (Throwable t) {
+            if (err != null) {
+                err.println("WARN: Ctrl+C cancel unavailable: " + t.getMessage());
+            }
+        }
+    }
+
+    /** 取消当前 JDBC 语句; 无活动语句返回 false. */
+    public boolean cancelActiveStatement() {
+        Statement st = activeStatement.get();
+        if (st == null) {
+            return false;
+        }
+        cancelledByInterrupt.set(true);
+        try {
+            st.cancel();
+        } catch (SQLException ignored) {
+            // 驱动可能已结束; 仍视为已请求取消
+        }
+        return true;
+    }
+
+    private void beginActive(Statement st) {
+        cancelledByInterrupt.set(false);
+        activeStatement.set(st);
+    }
+
+    private void endActive(Statement st) {
+        activeStatement.compareAndSet(st, null);
+    }
+
+    private boolean wasCancelled() {
+        return cancelledByInterrupt.getAndSet(false);
+    }
+
+    /** 若最近失败为用户取消则返回 true 并清除标记. */
+    public boolean consumeCancelFailure() {
+        return lastFailureWasCancel.getAndSet(false);
+    }
+
+    private void markCancelFailure() {
+        lastFailureWasCancel.set(true);
+        wasCancelled();
     }
 
     /**
@@ -187,13 +283,18 @@ public final class SqlExecutor {
             } catch (SQLException e) {
                 cfg.lastSqlCode = sqlCodeOf(e);
                 cfg.lastSqlFailed = true;
-                err.println("SQL error: " + e.getMessage());
+                if (cancelledByInterrupt.get()) {
+                    markCancelFailure();
+                } else {
+                    err.println("SQL error: " + e.getMessage());
+                }
                 return false;
             } catch (IllegalArgumentException e) {
                 err.println("Error: " + e.getMessage());
                 return false;
             }
         }
+        lastFailureWasCancel.set(false);
         ColonPlan colon = null;
         if (bindList.isEmpty() && !cfg.variables.isEmpty()) {
             colon = rewriteColonBinds(trimmed, cfg);
@@ -206,6 +307,7 @@ public final class SqlExecutor {
             if (!bindList.isEmpty()) {
                 PreparedStatement ps = session.connection().prepareStatement(trimmed);
                 st = ps;
+                beginActive(st);
                 applyStatementOptions(ps, cfg);
                 applyBinds(ps, bindList);
                 boolean hasRs = ps.execute();
@@ -214,6 +316,7 @@ public final class SqlExecutor {
                 executeWithColonBinds(colon, cfg, vertical);
             } else {
                 st = session.connection().createStatement();
+                beginActive(st);
                 applyStatementOptions(st, cfg);
                 boolean hasRs = st.execute(trimmed);
                 drainResults(st, cfg, vertical, hasRs);
@@ -235,12 +338,18 @@ public final class SqlExecutor {
         } catch (SQLException e) {
             cfg.lastSqlCode = sqlCodeOf(e);
             cfg.lastSqlFailed = true;
+            if (cancelledByInterrupt.get()) {
+                markCancelFailure();
+                // 信号处理器已打印 SQL cancelled.
+                return false;
+            }
             err.println("SQL error: " + e.getMessage());
             if (!bindList.isEmpty()) {
                 err.println("Hint: BINDVAR ON uses PreparedStatement; try SET BINDVAR OFF");
             }
             return false;
         } finally {
+            endActive(st);
             if (st != null) {
                 try {
                     st.close();
@@ -320,6 +429,7 @@ public final class SqlExecutor {
         // Yashan 对匿名块 OUT 绑定不稳定; PL/SQL 与 DQL 一律按 IN PreparedStatement
         // (赋值请用 EXEC :name := 字面量 客户端路径)
         PreparedStatement ps = session.connection().prepareStatement(plan.sql);
+        beginActive(ps);
         try {
             applyStatementOptions(ps, cfg);
             for (int i = 0; i < plan.names.size(); i++) {
@@ -328,6 +438,7 @@ public final class SqlExecutor {
             boolean hasRs = ps.execute();
             drainResults(ps, cfg, vertical, hasRs);
         } finally {
+            endActive(ps);
             ps.close();
         }
     }
@@ -1300,6 +1411,7 @@ public final class SqlExecutor {
         }
         CallableStatement cs = session.connection().prepareCall(finalSql.toString());
         boolean assignOk = false;
+        beginActive(cs);
         try {
             applyStatementOptions(cs, cfg);
             for (int idx = 0; idx < slots.size(); idx++) {
@@ -1341,6 +1453,7 @@ public final class SqlExecutor {
             // 无直接结果集要 drain; 游标已挂到变量
             return true;
         } finally {
+            endActive(cs);
             if (!assignOk) {
                 try {
                     cs.close();

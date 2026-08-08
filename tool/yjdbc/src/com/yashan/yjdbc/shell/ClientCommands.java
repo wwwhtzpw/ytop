@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -25,8 +26,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 客户端命令: @/@@/START / DESC / COL / DEFINE / ACCEPT / SET / SHOW / PROMPT / SPOOL / CLEAR / EXEC /
- * WHENEVER / EXIT.
+ * 客户端命令: @/@@/START / ? (peek) / # (edit-temp-run) / DESC / COL / DEFINE / ACCEPT /
+ * SET / SHOW / PROMPT / SPOOL / CLEAR / EXEC / WHENEVER / EXIT.
  */
 public final class ClientCommands {
     private static final int MAX_NEST = 32;
@@ -39,6 +40,12 @@ public final class ClientCommands {
     /** group1=@@ 标记; group2=路径; group3=可选参数串. */
     private static final Pattern AT = Pattern.compile(
             "(?i)^\\s*(?:@(@?)|STA(?:RT)?)\\s*(\\S+)(?:\\s+(.*))?\\s*$");
+    /** ?path [args] — 查看脚本 (不执行). group1=路径; group2=可选参数(忽略). */
+    private static final Pattern PEEK = Pattern.compile(
+            "^\\s*\\?\\s*(\\S+)(?:\\s+(.*))?\\s*$");
+    /** #path [args] — 编辑临时副本, 有变更则按 @ 执行. */
+    private static final Pattern EDIT_RUN = Pattern.compile(
+            "^\\s*#\\s*(\\S+)(?:\\s+(.*))?\\s*$");
     private static final Pattern COL_CLEAR = Pattern.compile(
             "(?i)^\\s*COL(?:UMN)?\\s+([\\w.$#\"]+)\\s+CLEAR\\s*;?\\s*$");
     private static final Pattern COL_LIST = Pattern.compile(
@@ -230,6 +237,18 @@ public final class ClientCommands {
                 msg = expanded;
             }
             session.config().println(out, msg);
+            return true;
+        }
+
+        Matcher peek = PEEK.matcher(s);
+        if (peek.matches()) {
+            peekScript(peek.group(1), false, scriptDir);
+            return true;
+        }
+        Matcher editRun = EDIT_RUN.matcher(s);
+        if (editRun.matches()) {
+            String[] scriptArgs = parseScriptArgs(editRun.group(2));
+            editAndMaybeRun(editRun.group(1), scriptArgs, false, scriptDir, depth);
             return true;
         }
 
@@ -442,7 +461,9 @@ public final class ClientCommands {
         }
         boolean ok = executor.execute(expanded.sql, expanded.binds, spec.verticalOnce);
         if (!ok) {
-            onSqlError();
+            if (!executor.consumeCancelFailure()) {
+                onSqlError();
+            }
         } else {
             rememberSql(expanded.sql);
         }
@@ -888,6 +909,148 @@ public final class ClientCommands {
             }
         }
         return out.toArray(new String[out.size()]);
+    }
+
+    /** ?path: 只读打印脚本内容 (不执行、不展开 &). */
+    private void peekScript(String path, boolean relativeToScript, File scriptDir) {
+        File f = resolveScriptFile(path, relativeToScript, scriptDir);
+        if (f == null) {
+            err.println("Error: cannot open " + path
+                    + " (tried: absolute, sql-home/embed, cwd"
+                    + (relativeToScript ? ", script-dir" : "") + ")");
+            onOsError();
+            return;
+        }
+        SessionConfig cfg = session.config();
+        cfg.println(out, "Script: " + f.getAbsolutePath());
+        BufferedReader br = null;
+        try {
+            br = new BufferedReader(new InputStreamReader(
+                    new FileInputStream(f), StandardCharsets.UTF_8));
+            String line;
+            while ((line = br.readLine()) != null) {
+                cfg.println(out, line);
+            }
+        } catch (IOException e) {
+            err.println("Error: cannot read " + f.getAbsolutePath() + ": " + e.getMessage());
+            onOsError();
+        } finally {
+            if (br != null) {
+                try {
+                    br.close();
+                } catch (IOException ignored) {
+                    // ignore
+                }
+            }
+        }
+    }
+
+    /**
+     * #path: 拷贝到临时文件 → EDITOR 编辑 → 有变更则 runScriptFile(temp);
+     * 永不写回原文件.
+     */
+    private void editAndMaybeRun(String path, String[] scriptArgs,
+                                 boolean relativeToScript, File scriptDir, int depth) {
+        SessionConfig cfg = session.config();
+        if (cfg.batch) {
+            err.println("Error: # requires an interactive terminal");
+            onOsError();
+            return;
+        }
+        File src = resolveScriptFile(path, relativeToScript, scriptDir);
+        if (src == null) {
+            err.println("Error: cannot open " + path
+                    + " (tried: absolute, sql-home/embed, cwd"
+                    + (relativeToScript ? ", script-dir" : "") + ")");
+            onOsError();
+            return;
+        }
+        File tmp = null;
+        try {
+            tmp = File.createTempFile("ytop-yjdbc-edit-", ".sql");
+            Files.copy(src.toPath(), tmp.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            String editor = resolveEditor();
+            ProcessBuilder pb = new ProcessBuilder(
+                    "/bin/sh", "-c", editor + " \"$1\"", "sh", tmp.getAbsolutePath());
+            pb.inheritIO();
+            int code = pb.start().waitFor();
+            if (code != 0) {
+                err.println("Edit cancelled.");
+                return;
+            }
+            if (sameFileBytes(src, tmp)) {
+                err.println("No changes; not executed.");
+                return;
+            }
+            runScriptFile(tmp, depth, scriptArgs == null ? new String[0] : scriptArgs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            err.println("Edit cancelled.");
+        } catch (IOException e) {
+            err.println("Error: # edit failed: " + e.getMessage());
+            onOsError();
+        } finally {
+            if (tmp != null && tmp.exists() && !tmp.delete()) {
+                tmp.deleteOnExit();
+            }
+        }
+    }
+
+    private static String resolveEditor() {
+        String e = System.getenv("EDITOR");
+        if (e != null && !e.trim().isEmpty()) {
+            return e.trim();
+        }
+        e = System.getenv("VISUAL");
+        if (e != null && !e.trim().isEmpty()) {
+            return e.trim();
+        }
+        return "vi";
+    }
+
+    private static boolean sameFileBytes(File a, File b) throws IOException {
+        if (a.length() != b.length()) {
+            return false;
+        }
+        FileInputStream inA = null;
+        FileInputStream inB = null;
+        try {
+            inA = new FileInputStream(a);
+            inB = new FileInputStream(b);
+            byte[] bufA = new byte[8192];
+            byte[] bufB = new byte[8192];
+            while (true) {
+                int na = inA.read(bufA);
+                int nb = inB.read(bufB);
+                if (na != nb) {
+                    return false;
+                }
+                if (na < 0) {
+                    return true;
+                }
+                for (int i = 0; i < na; i++) {
+                    if (bufA[i] != bufB[i]) {
+                        return false;
+                    }
+                }
+            }
+        } finally {
+            if (inA != null) {
+                try {
+                    inA.close();
+                } catch (IOException ignored) {
+                    // ignore
+                }
+            }
+            if (inB != null) {
+                try {
+                    inB.close();
+                } catch (IOException ignored) {
+                    // ignore
+                }
+            }
+        }
     }
 
     /**

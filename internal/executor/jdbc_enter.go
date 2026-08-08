@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/yihan/ytop/internal/config"
@@ -142,6 +143,30 @@ func ResolveJdbcSQLScript(scriptArg string) (path string, cleanup func(), err er
 	return tmp, cleanup, nil
 }
 
+// sanitizeJdbcTermEnv 复制环境; TERM 为空或 dumb 时改为 xterm-256color, 避免 JLine UnsupportedTerminal.
+func sanitizeJdbcTermEnv(base []string) []string {
+	out := make([]string, 0, len(base)+1)
+	term := ""
+	hasTerm := false
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "TERM=") {
+			hasTerm = true
+			term = strings.TrimPrefix(kv, "TERM=")
+			if term == "" || strings.EqualFold(term, "dumb") {
+				out = append(out, "TERM=xterm-256color")
+			} else {
+				out = append(out, kv)
+			}
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !hasTerm {
+		out = append(out, "TERM=xterm-256color")
+	}
+	return out
+}
+
 // EnterJdbcShell 在控制端本机拉起 Java yjdbc shell; 不走 SSH.
 // 若 cfg.ExecuteScript 为 SQL, 则以 --script 批处理执行后退出.
 func (e *Executor) EnterJdbcShell() (exitCode int, err error) {
@@ -165,13 +190,20 @@ func (e *Executor) EnterJdbcShell() (exitCode int, err error) {
 	}
 	defer cleanupDriver()
 
+	// JLine: 拉长 ESC 歧义超时; 非 Windows 强制 unix, 避免 TERM=dumb 落入 UnsupportedTerminal
 	args := []string{
-		"-cp", yjdbc + string(os.PathListSeparator) + driver,
+		"-Djline.esc.timeout=500",
+	}
+	if runtime.GOOS != "windows" {
+		args = append(args, "-Djline.terminal=unix")
+	}
+	args = append(args,
+		"-cp", yjdbc+string(os.PathListSeparator)+driver,
 		"com.yashan.yjdbc.Main", "shell",
 		"--url", BuildYashanJdbcURL(cfg.JdbcHost, cfg.JdbcPort, cfg.DbName),
 		"--user", cfg.JdbcUser,
 		"--password", cfg.JdbcPassword,
-	}
+	)
 
 	// 抽出内嵌 SQL, 供 @ / @@ 按「内嵌 → cwd」查找 (失败则仅 cwd/绝对路径仍可用)
 	sqlHome, cleanupHome, he := scripts.StageSQLScriptHome()
@@ -193,6 +225,7 @@ func (e *Executor) EnterJdbcShell() (exitCode int, err error) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = sanitizeJdbcTermEnv(os.Environ())
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return ee.ExitCode(), nil
