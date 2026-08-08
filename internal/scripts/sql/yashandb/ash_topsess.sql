@@ -3,6 +3,7 @@
 -- Created: 20260613  by  huangtingzhong
 -- Oracle ref: ash_topsess.sql
 -- Variables: &btime (yyyy-mm-dd hh24:mi:ss), &hour (interval hours), &display_time, &top_n
+-- Numeric/time &vars: empty => default via NVL/TO_NUMBER (safe for ytop and yasql).
 
 col time     for a17
 col sid      for a16
@@ -35,8 +36,8 @@ WITH ash_raw AS (
            1 AS cnt
       FROM gv$active_session_history
      WHERE is_awr_sample = 'N'
-       AND sample_time >= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss')
-       AND sample_time <= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss') + &hour / 24
+       AND sample_time >= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24)
+       AND sample_time <= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24) + NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24
     UNION ALL
     SELECT instance_number AS inst_id,
            session_id,
@@ -52,13 +53,13 @@ WITH ash_raw AS (
                   NVL(wait_class, 'Other')) AS wait_class,
            10 AS cnt
       FROM dba_hist_active_sess_history
-     WHERE sample_time >= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss')
-       AND sample_time <= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss') + &hour / 24
+     WHERE sample_time >= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24)
+       AND sample_time <= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24) + NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24
 ),
 agg AS (
     SELECT TO_CHAR(sample_time, 'yyyymmdd hh24') || ' '
-           || &display_time * FLOOR(EXTRACT(MINUTE FROM sample_time) / &display_time) || '-'
-           || &display_time * (FLOOR(EXTRACT(MINUTE FROM sample_time) / &display_time) + 1) AS time,
+           || NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1) * FLOOR(EXTRACT(MINUTE FROM sample_time) / NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1)) || '-'
+           || NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1) * (FLOOR(EXTRACT(MINUTE FROM sample_time) / NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1)) + 1) AS time,
            ash.inst_id,
            ash.session_id,
            ash.session_serial#,
@@ -74,8 +75,8 @@ agg AS (
       FROM ash_raw ash
       LEFT JOIN dba_users u ON ash.user_id = u.user_id
      GROUP BY TO_CHAR(sample_time, 'yyyymmdd hh24') || ' '
-              || &display_time * FLOOR(EXTRACT(MINUTE FROM sample_time) / &display_time) || '-'
-              || &display_time * (FLOOR(EXTRACT(MINUTE FROM sample_time) / &display_time) + 1),
+              || NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1) * FLOOR(EXTRACT(MINUTE FROM sample_time) / NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1)) || '-'
+              || NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1) * (FLOOR(EXTRACT(MINUTE FROM sample_time) / NVL(TO_NUMBER(NULLIF(TRIM('&display_time'), '')), 1)) + 1),
               ash.inst_id,
               ash.session_id,
               ash.session_serial#,
@@ -100,5 +101,5 @@ SELECT ranked.time,
                SUM(agg.sum_db_time) OVER (PARTITION BY agg.time) AS total_db_time
           FROM agg
        ) ranked
- WHERE ranked.rn <= &top_n
+ WHERE ranked.rn <= NVL(TO_NUMBER(NULLIF(TRIM('&top_n'), '')), 10)
  ORDER BY ranked.time, ranked.rn;

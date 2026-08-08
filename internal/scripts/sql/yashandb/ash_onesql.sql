@@ -3,6 +3,7 @@
 -- Created: 20260613  by  huangtingzhong
 -- Oracle ref: ash_onesql.sql
 -- Variables: &btime (yyyy-mm-dd hh24:mi:ss), &hour (interval hours), &sql_id
+-- Numeric/time &vars: empty => default via NVL/TO_NUMBER (safe for ytop and yasql).
 
 col time          for a19
 col inst          for a3
@@ -23,8 +24,8 @@ SELECT TO_CHAR(sample_time, 'yyyy-mm-dd hh24:mi:ss') AS time,
        wait_class
   FROM gv$active_session_history
  WHERE is_awr_sample = 'N'
-   AND sample_time >= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss')
-   AND sample_time <= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss') + &hour / 24
+   AND sample_time >= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24)
+   AND sample_time <= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24) + NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24
    AND sql_id = '&sql_id'
 UNION ALL
 SELECT TO_CHAR(sample_time, 'yyyy-mm-dd hh24:mi:ss') AS time,
@@ -36,8 +37,8 @@ SELECT TO_CHAR(sample_time, 'yyyy-mm-dd hh24:mi:ss') AS time,
        SUBSTR(NVL(event, session_state), 1, 25),
        wait_class
   FROM dba_hist_active_sess_history
- WHERE sample_time >= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss')
-   AND sample_time <= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss') + &hour / 24
+ WHERE sample_time >= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24)
+   AND sample_time <= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24) + NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24
    AND sql_id = '&sql_id'
  ORDER BY time;
 
@@ -81,8 +82,8 @@ SELECT sql_id,
                sql_plan_hash_value
           FROM gv$active_session_history
          WHERE is_awr_sample = 'N'
-           AND sample_time >= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss')
-           AND sample_time <= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss') + &hour / 24
+           AND sample_time >= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24)
+           AND sample_time <= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24) + NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24
            AND sql_id = '&sql_id'
         UNION ALL
         SELECT sql_id,
@@ -94,8 +95,8 @@ SELECT sql_id,
                10 AS cnt,
                sql_plan_hash_value
           FROM dba_hist_active_sess_history
-         WHERE sample_time >= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss')
-           AND sample_time <= TO_DATE('&btime', 'yyyy-mm-dd hh24:mi:ss') + &hour / 24
+         WHERE sample_time >= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24)
+           AND sample_time <= NVL(TO_DATE(NULLIF(TRIM('&btime'), ''), 'yyyy-mm-dd hh24:mi:ss'), SYSDATE - NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24) + NVL(TO_NUMBER(NULLIF(TRIM('&hour'), '')), 1) / 24
            AND sql_id = '&sql_id'
        ) ash
  GROUP BY sql_id, sql_plan_hash_value
