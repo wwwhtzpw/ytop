@@ -17,9 +17,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE interval_sec
-UNDEFINE sid
-UNDEFINE min_ublk
 
 ACCEPT interval_sec PROMPT 'Enter sample interval seconds (default 5): '
 ACCEPT sid PROMPT 'Enter SID filter (empty=all rollback/undo candidates): '

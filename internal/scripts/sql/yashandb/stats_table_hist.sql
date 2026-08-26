@@ -7,9 +7,6 @@
 -- Note: histogram type may show as FREQUENCE (Yashan spelling)
 -- Note: numeric endpoint_value (incl. scientific E+/-) shown as plain decimal
 
-UNDEFINE owner
-UNDEFINE tablename
-UNDEFINE columnname
 
 col o_t          for a28
 col column_name  for a20

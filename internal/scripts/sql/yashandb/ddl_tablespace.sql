@@ -18,8 +18,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE tablespace_name
-
 PROMPT
 PROMPT +------------------------------------------------------------------------+
 PROMPT | Generate TABLESPACE DDL (dictionary reconstruct)                       |

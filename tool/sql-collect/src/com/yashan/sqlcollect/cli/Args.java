@@ -7,17 +7,12 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * 简易 argv 解析 (collect/replay/check/sqlmap).
+ * 简易 argv 解析 (collect/replay/check/top).
  * 短选项: 常用小写 / 不常用大写; 映射为 kebab-case 长名后写入 options.
- * sqlmap: subcommand 之后全部 token 进入 sqlmapArgv, 禁止全局 mapShortOption.
  */
 public class Args {
 
     public String command = "collect";
-    /** sqlmap 二级子命令 (create/list/...); 非 sqlmap 时为空 */
-    public String subcommand = "";
-    /** sqlmap subcommand 之后的原始 argv (本地 SqlMapArgs 解析) */
-    public final List<String> sqlmapArgv = new ArrayList<String>();
     public final Map<String, String> options = new HashMap<String, String>();
     public final List<String> positional = new ArrayList<String>();
     public boolean help;
@@ -31,28 +26,10 @@ public class Args {
         }
         int i = 0;
         if (!rest.isEmpty() && ("collect".equals(rest.get(0)) || "replay".equals(rest.get(0))
-                || "check".equals(rest.get(0)) || "sqlmap".equals(rest.get(0))
-                || "top".equals(rest.get(0)))) {
+                || "check".equals(rest.get(0)) || "top".equals(rest.get(0))
+                || "sqlmap".equals(rest.get(0)))) {
             a.command = rest.get(0);
             i = 1;
-        }
-        if ("sqlmap".equals(a.command)) {
-            // 允许 sqlmap --help (无 subcommand)
-            if (i < rest.size()) {
-                String tok = rest.get(i);
-                if ("--help".equals(tok) || "-h".equals(tok)) {
-                    a.help = true;
-                    i++;
-                } else if (!tok.startsWith("-")) {
-                    a.subcommand = tok;
-                    i++;
-                }
-            }
-            while (i < rest.size()) {
-                a.sqlmapArgv.add(rest.get(i));
-                i++;
-            }
-            return a;
         }
         while (i < rest.size()) {
             String tok = rest.get(i);

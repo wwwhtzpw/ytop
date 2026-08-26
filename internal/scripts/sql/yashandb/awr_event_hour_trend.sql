@@ -14,8 +14,6 @@
 --   ytop -t <IP> -f awr_event_hour_trend.sql
 --   DEFINE eventname = 'db file%'; DEFINE inst_scope = all; @awr_event_hour_trend.sql
 
-UNDEFINE eventname;
-UNDEFINE inst_scope;
 
 COL "date" FOR A8
 COL event_name    FOR A18

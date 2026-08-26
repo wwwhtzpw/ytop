@@ -251,6 +251,8 @@ public interface LineSource {
             }
             cr = new ConsoleReader(System.in, System.out, terminal);
             LineSource.applyCrossPlatformKeyBindings(cr.getKeys());
+            // 禁止 bash 风格 !event 历史展开, 否则 !ls / !pwd 在到达 HOST 前被 JLine 吞掉
+            cr.setExpandEvents(false);
             // 提示符 Ctrl+C → UserInterruptException; 读行结束后恢复 intr, SQL 执行期可收 SIGINT
             cr.setHandleUserInterrupt(true);
             mh = new MemoryHistory();

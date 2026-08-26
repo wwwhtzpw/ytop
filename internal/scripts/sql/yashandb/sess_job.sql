@@ -11,14 +11,14 @@
 --   Display width budget <= 200 (col formats + 1-space separators; see sql-script-guide §3.2).
 
 -- width budget (<=200):
--- sid_tid20 event20 username10 sql_id18 exec8 job18 state9 inst1 params28 program16 client14
--- = 162 + 11 spaces = 173
+-- sid_tid20 event20 username10 sql_id18 exec6 job18 state9 inst1 params28 program16 client14
+-- = 160 + 11 spaces = 171
 
 col SID_TID              for a20
 col EVENT                for a20
 col USERNAME             for a10
 col SQL_ID               for a18
-col EXEC_TIME            for a8
+col EXECT                for a6
 col JOB_NAME             for a18
 col STATE                for a9
 col I                    for a1
@@ -44,7 +44,7 @@ SELECT
             ROUND(exec_ms / 3600000, 2) || 'H'
         ELSE
             ROUND(exec_ms / 86400000, 2) || 'D'
-    END AS exec_time,
+    END AS exect,
     job_name,
     state,
     i,

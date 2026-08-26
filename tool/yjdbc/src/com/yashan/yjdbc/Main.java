@@ -70,7 +70,7 @@ public final class Main {
         System.out.println("End SQL with ; or \\G (vertical rows like MySQL); empty / re-runs last SQL");
         System.out.println("Substitution: &var  &&var  &1  DEFINE name=value");
         System.out.println("@script.sql arg1 arg2  ->  &1 &2 (quoted args ok)");
-        System.out.println("SET BINDVAR ON: &var -> JDBC ? binds (default OFF = literal)");
+        System.out.println("SET BINDVAR ON: &var -> JDBC ? for DQL/DML (default ON; PL/SQL anon blocks stay literal)");
         System.out.println("WHENEVER SQLERROR|OSERROR EXIT|CONTINUE [status] [COMMIT|ROLLBACK|NONE]");
         System.out.println("EXIT [SUCCESS|FAILURE|WARNING|SQL.SQLCODE|n] [COMMIT|ROLLBACK|NONE]");
     }

@@ -4,7 +4,6 @@
 -- Oracle ref: /Users/yihan/Documents/owner/sql/object_invalid_compile.sql
 -- Note: YashanDB does not support ALTER VIEW ... COMPILE; VIEW rows are listed as comments only
 
-UNDEFINE owner
 
 col compile_ddl for a120
 

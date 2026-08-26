@@ -4,7 +4,6 @@
 -- Oracle ref: /Users/yihan/Documents/owner/sql/sess_cursor.sql
 -- Note: no CURSOR_TYPE / process SPID; uses OPENED CURSORS CURRENT + OPEN_CURSORS
 
-UNDEFINE username
 
 col username   for a20
 col sid        for a8

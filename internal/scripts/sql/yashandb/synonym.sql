@@ -3,8 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/synonym.sql
 
-UNDEFINE synonym_name
-UNDEFINE owner
 
 col owner_name  for a40
 col target_name for a40

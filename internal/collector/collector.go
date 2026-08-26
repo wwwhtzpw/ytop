@@ -290,7 +290,7 @@ func (c *Collector) CollectSessionDetails(ctx context.Context) ([]models.Session
 		instFilter = fmt.Sprintf(" AND a.INST_ID = %d", c.cfg.InstanceID)
 	}
 
-	// 与 we.sql 对齐: 在 SQL 内把 exec_ms 格式化为字符列 exec_time, 避免 NUMBER + COL FOR An.
+	// 与 we.sql 对齐: 在 SQL 内把 exec_ms 格式化为字符列 exect, 避免 NUMBER + COL FOR An.
 	sqlBody := fmt.Sprintf(`
 SELECT
     sid_tid,
@@ -310,7 +310,7 @@ SELECT
             ROUND(exec_ms / 3600000, 2) || 'H'
         ELSE
             ROUND(exec_ms / 86400000, 2) || 'D'
-    END AS exec_time,
+    END AS exect,
     program,
     client,
     TO_CHAR(inst_id) AS inst_id
@@ -440,8 +440,8 @@ FROM (
 }
 
 // sessionDetailColPrefix sets fixed column widths for yasql table output (aligned with we.sql).
-// 全部为字符列(含 TO_CHAR(inst_id) / CASE 拼出的 exec_time), 避免 NUMBER 直接 COL FOR An.
-// EXEC_TIME 至少 a9: 表头 "EXEC_TIME" 为 9 字符, a8 会截成 EXEC_TIM 导致解析不到而显示 0MS.
+// 全部为字符列(含 TO_CHAR(inst_id) / CASE 拼出的 exect), 避免 NUMBER 直接 COL FOR An.
+// 显示别名 EXECT + a6: 与 we.sql 一致, 表头与值同宽不截断.
 func sessionDetailColPrefix(dbType string) string {
 	switch dbType {
 	case "yashandb", "oracle", "dameng":
@@ -449,7 +449,7 @@ func sessionDetailColPrefix(dbType string) string {
 col EVENT for a20
 col USERNAME for a15
 col SQL_ID for a20
-col EXEC_TIME for a10
+col EXECT for a6
 col PROGRAM for a30
 col CLIENT for a20
 col INST_ID for a7
@@ -474,7 +474,7 @@ func normalizeSessionDetailHeader(h string) string {
 	h = strings.ToUpper(strings.TrimSpace(h))
 	h = strings.ReplaceAll(h, " ", "_")
 	switch h {
-	case "EXEC_MS", "EXEC_TIM": // EXEC_TIM: yasql truncates EXEC_TIME under COL a8
+	case "EXECT", "EXEC_T", "EXEC_MS", "EXEC_TIM", "EXEC_TIME": // EXECT: we.sql 短名; EXEC_TIM: 旧 a8 截断兼容
 		return "EXEC_TIME"
 	case "SID", "SID_SERIAL", "SID.SERIAL":
 		return "SID_TID"

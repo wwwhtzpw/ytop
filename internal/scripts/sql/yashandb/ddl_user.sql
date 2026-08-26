@@ -17,8 +17,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE username
-
 PROMPT
 PROMPT +------------------------------------------------------------------------+
 PROMPT | Generate USER DDL (dictionary reconstruct, keep password hash)         |

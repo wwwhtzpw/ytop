@@ -13,7 +13,7 @@ col PROGRAM           for a30
 col EVENT             for a30
 col USERNAME          for a15
 col SQL_ID            for a18
-col EXEC_TIME         for a10
+col EXECT             for a6
 col CLIENT            for a20
 
 SELECT 
@@ -34,7 +34,7 @@ SELECT
             ROUND(exec_ms / 3600000, 2) || 'H'
         ELSE 
             ROUND(exec_ms / 86400000, 2) || 'D'
-    END AS exec_time,
+    END AS exect,
     program,
     client 
 FROM (

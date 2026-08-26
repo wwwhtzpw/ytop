@@ -5,8 +5,6 @@
 -- Params: &&owner, &&object_name (empty=match all for that filter)
 -- Source view: DBA_DEPENDENCIES + DBA_OBJECTS
 
-UNDEFINE owner
-UNDEFINE object_name
 
 col owner_name      for a40
 col referenced_type for a15

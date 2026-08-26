@@ -1,6 +1,7 @@
 -- File Name: outline.sql
 -- Purpose: View YashanDB OUTLINE (list all + look up by name / sql_id / sql_text fragment)
 -- Created: 20260801  by  huangtingzhong
+-- Updated: 20260809 by huangtingzhong (sql_text fragment match via CLOB chunk scan; no 32K)
 --
 -- Usage: ytop/yasql -f outline.sql   (prompts outline name)
 --   blank : list all OUTLINEs
@@ -31,6 +32,52 @@ DECLARE
   FUNCTION has_value(p IN VARCHAR2) RETURN BOOLEAN IS
   BEGIN
     RETURN p IS NOT NULL AND LENGTH(TRIM(p)) > 0;
+  END;
+
+  -- case-insensitive CLOB contains; chunk=1000 with pattern overlap (no 32K truncate)
+  FUNCTION clob_contains_ci(p_clob IN CLOB, p_pat IN VARCHAR2) RETURN BOOLEAN IS
+    c_chunk CONSTANT PLS_INTEGER := 1000;
+    v_pat   VARCHAR2(4000) := UPPER(p_pat);
+    v_plen  PLS_INTEGER;
+    v_len   NUMBER;
+    v_off   NUMBER := 1;
+    v_amt   NUMBER;
+    v_ov    PLS_INTEGER;
+    v_buf   VARCHAR2(4000);
+  BEGIN
+    IF p_clob IS NULL OR p_pat IS NULL OR LENGTH(p_pat) = 0 THEN
+      RETURN FALSE;
+    END IF;
+    v_plen := LENGTH(v_pat);
+    IF v_plen > 3000 THEN
+      RETURN FALSE;
+    END IF;
+    v_len := NVL(DBMS_LOB.GETLENGTH(p_clob), 0);
+    IF v_len = 0 THEN
+      RETURN FALSE;
+    END IF;
+    v_ov := GREATEST(v_plen - 1, 0);
+    WHILE v_off <= v_len LOOP
+      v_amt := LEAST(c_chunk + v_ov, v_len - v_off + 1);
+      v_buf := UPPER(DBMS_LOB.SUBSTR(p_clob, v_amt, v_off));
+      IF INSTR(v_buf, v_pat) > 0 THEN
+        RETURN TRUE;
+      END IF;
+      v_off := v_off + c_chunk;
+    END LOOP;
+    RETURN FALSE;
+  END;
+
+  FUNCTION outline_matches(p_name IN VARCHAR2, p_sqlid IN VARCHAR2,
+                           p_sql IN CLOB, p_input IN VARCHAR2) RETURN BOOLEAN IS
+  BEGIN
+    IF UPPER(p_name) = UPPER(p_input) THEN
+      RETURN TRUE;
+    END IF;
+    IF p_sqlid IS NOT NULL AND p_sqlid = p_input THEN
+      RETURN TRUE;
+    END IF;
+    RETURN clob_contains_ci(p_sql, p_input);
   END;
 
   PROCEDURE bar(p_title IN VARCHAR2 DEFAULT NULL) IS
@@ -68,25 +115,24 @@ DECLARE
     WHEN NO_DATA_FOUND THEN DBMS_OUTPUT.PUT_LINE('  outline not found: ' || p_name);
   END;
 
-  -- match by NAME (exact, case-insensitive) / SQL_ID / SQL_TEXT fragment (substring)
+  -- match by NAME (exact, case-insensitive) / SQL_ID / SQL_TEXT fragment (full CLOB)
   FUNCTION match_count(p_input IN VARCHAR2) RETURN NUMBER IS
-    v_n NUMBER;
+    v_n NUMBER := 0;
   BEGIN
-    SELECT COUNT(*) INTO v_n FROM dba_outlines
-     WHERE UPPER(name) = UPPER(p_input)
-        OR sql_id = p_input
-        OR INSTR(UPPER(DBMS_LOB.SUBSTR(sql_text, 32767, 1)), UPPER(p_input)) > 0;
+    FOR r IN (SELECT name, sql_id, sql_text FROM dba_outlines) LOOP
+      IF outline_matches(r.name, r.sql_id, r.sql_text, p_input) THEN
+        v_n := v_n + 1;
+      END IF;
+    END LOOP;
     RETURN v_n;
   END;
 
   PROCEDURE show_matches(p_input IN VARCHAR2) IS
   BEGIN
-    FOR r IN (SELECT name FROM dba_outlines
-               WHERE UPPER(name) = UPPER(p_input)
-                  OR sql_id = p_input
-                  OR INSTR(UPPER(DBMS_LOB.SUBSTR(sql_text, 32767, 1)), UPPER(p_input)) > 0
-               ORDER BY name) LOOP
-      show_detail(r.name);
+    FOR r IN (SELECT name, sql_id, sql_text FROM dba_outlines ORDER BY name) LOOP
+      IF outline_matches(r.name, r.sql_id, r.sql_text, p_input) THEN
+        show_detail(r.name);
+      END IF;
     END LOOP;
   END;
 

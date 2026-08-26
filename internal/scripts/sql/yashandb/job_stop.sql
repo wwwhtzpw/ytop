@@ -12,9 +12,6 @@ SET SERVEROUTPUT ON
 SET VERIFY OFF
 SET FEEDBACK OFF
 
-UNDEFINE owner
-UNDEFINE jobname
-UNDEFINE confirm
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+

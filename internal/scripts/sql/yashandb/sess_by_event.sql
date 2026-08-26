@@ -4,7 +4,6 @@
 -- Oracle ref: /Users/yihan/Documents/owner/sql/sess_by_event.sql
 -- Note: filter on WAIT_EVENT (not EVENT); no gv$session_wait / audit_actions join
 
-UNDEFINE event_name
 
 col i          for a2
 col sid_ser    for a16

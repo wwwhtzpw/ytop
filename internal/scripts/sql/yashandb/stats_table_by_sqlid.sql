@@ -17,13 +17,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE sqlid
-UNDEFINE percent
-UNDEFINE method_opt
-UNDEFINE cascade
-UNDEFINE granularity
-UNDEFINE degree
-UNDEFINE block_sample
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+

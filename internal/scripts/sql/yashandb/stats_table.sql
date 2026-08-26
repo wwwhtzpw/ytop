@@ -18,15 +18,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE owner
-UNDEFINE tablename
-UNDEFINE partname
-UNDEFINE percent
-UNDEFINE method_opt
-UNDEFINE cascade
-UNDEFINE granularity
-UNDEFINE degree
-UNDEFINE block_sample
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+

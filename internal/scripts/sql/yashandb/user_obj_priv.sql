@@ -3,8 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/user_obj_priv.sql
 
-UNDEFINE grantee_username
-UNDEFINE objectname
 
 col grantee   for a20
 col owner     for a15

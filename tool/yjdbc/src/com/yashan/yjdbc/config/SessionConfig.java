@@ -1,6 +1,7 @@
 package com.yashan.yjdbc.config;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.sql.CallableStatement;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -57,9 +59,10 @@ public final class SessionConfig {
     public boolean escapeOn;
     public char escapeChar = '\\';
     /**
-     * ON: &var 改为 JDBC ? 绑定 (防硬解析); OFF: 字面量替换 (默认, 兼容 sqlplus).
+     * ON: &var / '&var' 改为 JDBC ? 绑定 (默认; 交互与 -E -f 相同).
+     * OFF: 字面量替换 (兼容部分依赖文本嵌入的脚本).
      */
-    public boolean bindVar;
+    public boolean bindVar = true;
     public String nullText = "";
     public boolean termout = true;
     public boolean autoCommit;
@@ -424,6 +427,33 @@ public final class SessionConfig {
         defines.put(name.trim().toUpperCase(Locale.ROOT), value == null ? "" : value);
     }
 
+    /**
+     * 脚本/--batch 下仍可对 &/&&/ACCEPT 提问的条件: stdin 为交互终端.
+     * 非 TTY (管道/CI/</dev/null) 禁止提问, 须 DEFINE / --define.
+     * 不用单靠 System.console(): 部分 JDK 在 stdin 重定向后仍非 null.
+     */
+    public boolean canPromptForDefine() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.indexOf("win") >= 0) {
+            return System.console() != null;
+        }
+        try {
+            ProcessBuilder pb = new ProcessBuilder("sh", "-c", "test -t 0");
+            pb.redirectInput(ProcessBuilder.Redirect.INHERIT);
+            File devNull = new File("/dev/null");
+            pb.redirectOutput(ProcessBuilder.Redirect.to(devNull));
+            pb.redirectError(ProcessBuilder.Redirect.to(devNull));
+            Process p = pb.start();
+            if (!p.waitFor(2L, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return System.console() != null;
+            }
+            return p.exitValue() == 0;
+        } catch (Exception e) {
+            return System.console() != null;
+        }
+    }
+
     public void undefine(String name) {
         if (name == null) {
             return;
@@ -529,7 +559,8 @@ public final class SessionConfig {
     }
 
     /**
-     * 执行前展开: BINDVAR OFF 字面量替换; ON 时尽量改为 ? + binds.
+     * 执行前展开: BINDVAR ON 时 &var → ? (DQL/DML);
+     * PL/SQL 匿名块 (DECLARE/BEGIN) 仍字面量替换 (库端对块内 ? 支持不完整).
      * 失败返回 null (已向 err 输出原因).
      */
     public ExpandResult expandForExec(String text, BufferedReader promptIn,
@@ -542,7 +573,9 @@ public final class SessionConfig {
             return new ExpandResult(restoreEscapedDefines(work), Collections.<String>emptyList());
         }
         ExpandResult r;
-        if (bindVar) {
+        // PL/SQL 块内 ? 会导致编译失败 (如 CONSTANT := ?); 强制字面量
+        boolean useBinds = bindVar && !looksLikePlsqlAnonymousBlock(work);
+        if (useBinds) {
             r = expandAsBinds(work, promptIn, out, err);
         } else {
             String expanded = expandAsLiterals(work, promptIn, out, err);
@@ -557,14 +590,45 @@ public final class SessionConfig {
         return new ExpandResult(restoreEscapedDefines(r.sql), r.binds);
     }
 
+    /** DECLARE/BEGIN 开头的匿名块 (忽略前导空白与简单注释行). */
+    static boolean looksLikePlsqlAnonymousBlock(String sql) {
+        if (sql == null) {
+            return false;
+        }
+        String s = sql.trim();
+        while (s.startsWith("--")) {
+            int nl = s.indexOf('\n');
+            if (nl < 0) {
+                return false;
+            }
+            s = s.substring(nl + 1).trim();
+        }
+        if (s.length() < 5) {
+            return false;
+        }
+        String u = s.substring(0, Math.min(7, s.length())).toUpperCase(Locale.ROOT);
+        return u.startsWith("DECLARE") || u.startsWith("BEGIN");
+    }
+
     /**
-     * 替换 &var / &&var 为字面量. DEFINE OFF 时原样返回.
+     * 替换 &var / &&var 为字面量 (PROMPT 等客户端展示; 不走 BINDVAR/?).
      * VERIFY ON 时在 out 打印 old/new.
+     * SQL 执行请用 {@link #expandForExec}.
      */
     public String substitute(String text, BufferedReader promptIn,
                              PrintStream out, PrintStream err) {
-        ExpandResult r = expandForExec(text, promptIn, out, err);
-        return r == null ? null : r.sql;
+        if (text == null) {
+            return null;
+        }
+        String work = protectEscapedDefines(text);
+        if (!defineOn || work.indexOf(defineChar) < 0) {
+            return restoreEscapedDefines(work);
+        }
+        String expanded = expandAsLiterals(work, promptIn, out, err);
+        if (expanded == null) {
+            return null;
+        }
+        return restoreEscapedDefines(expanded);
     }
 
     private String expandAsLiterals(String text, BufferedReader promptIn,
@@ -727,9 +791,9 @@ public final class SessionConfig {
         if (val != null) {
             return val;
         }
-        if (batch) {
+        if (!canPromptForDefine()) {
             err.println("Error: undefined variable " + name
-                    + " (batch mode; use DEFINE or &&)");
+                    + " (non-interactive; use DEFINE or --define)");
             return null;
         }
         print(out, "Enter value for " + name + ": ");

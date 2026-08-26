@@ -4,7 +4,6 @@
 
 -- Params: &&eventname (default empty = all non-Idle events; set to e.g. 'log file sync' for one event)
 
-UNDEFINE eventname;
 
 COL time_yyyymmdd FOR A8
 COL event_name   FOR A30

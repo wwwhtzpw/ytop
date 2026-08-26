@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Main-Class: com.yashan.yjdbc.Main
+Created-By: yjdbc build.sh
+Build-Target-Java: 8

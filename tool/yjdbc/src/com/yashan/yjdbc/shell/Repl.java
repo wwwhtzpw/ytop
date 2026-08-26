@@ -3,6 +3,8 @@ package com.yashan.yjdbc.shell;
 import com.yashan.yjdbc.config.SessionConfig;
 import com.yashan.yjdbc.db.JdbcSession;
 import com.yashan.yjdbc.exec.SqlExecutor;
+import com.yashan.yjdbc.slash.SlashContext;
+import com.yashan.yjdbc.slash.SlashRegistry;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -10,6 +12,7 @@ import java.io.PrintStream;
 
 /**
  * 交互 REPL: 提示符 YJDBC>, 以 ; 或 \\G 或单独一行 / 执行.
+ * 以 \\ 开头的行走 SlashRegistry (不进入 SQL 缓冲).
  * tty 下经 JLine 行编辑 + 会话历史; -f/batch/非交互回退普通读入.
  */
 public final class Repl {
@@ -28,13 +31,13 @@ public final class Repl {
         executor.attachAsInterruptTarget();
         SqlExecutor.installInterruptHandler(err);
         ClientCommands client = new ClientCommands(session, executor, out, err);
+        SlashRegistry slash = SlashRegistry.createDefault();
+        SlashContext slashCtx = new SlashContext(session, executor, out, err, slash);
 
         String script = session.config().scriptPath;
         boolean scripted = script != null && !script.trim().isEmpty();
-        // batch 或 --script: 不用 JLine; 否则尝试 (console 可为 null 仍试一次)
         boolean wantJLine = !scripted && !session.config().batch;
         if (wantJLine && System.console() == null) {
-            // 包装启动时常 console==null; 仍尝试, 失败由 LineSource.open 回退
             wantJLine = true;
         }
 
@@ -59,7 +62,6 @@ public final class Repl {
                 try {
                     line = lineSource.readLine(prompt);
                 } catch (LineSource.LineInterruptedException interrupted) {
-                    // 提示符 Ctrl+C: 丢弃未提交缓冲, 回到 YJDBC>
                     buf.setLength(0);
                     continue;
                 }
@@ -78,6 +80,11 @@ public final class Repl {
                         flushRaw(raw, client, executor, secondary);
                         record(hist, lineSource, LineSource.SessionHistory.stripSqlTerminator(raw));
                     }
+                    continue;
+                }
+                if (buf.length() == 0 && trimmed.startsWith("\\")) {
+                    slash.dispatch(slashCtx, trimmed);
+                    record(hist, lineSource, trimmed);
                     continue;
                 }
                 if (buf.length() == 0) {
@@ -121,7 +128,6 @@ public final class Repl {
         ls.syncHistory(hist);
     }
 
-    /** 客户端命令: RUN 记 rememberSql; 其它记原文 trim. */
     private static void recordClientOrRun(LineSource.SessionHistory hist, LineSource ls,
                                           ClientCommands client, String trimmedLine) {
         if (isRunCommand(trimmedLine)) {
@@ -150,7 +156,6 @@ public final class Repl {
         if ("/".equals(u)) {
             return true;
         }
-        // RUN or R (buffer run)
         return u.equalsIgnoreCase("RUN") || u.equalsIgnoreCase("R");
     }
 

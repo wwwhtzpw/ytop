@@ -1,14 +1,14 @@
 -- File Name: sql_stat.sql
--- Purpose: SQL exec stats from v$sqlarea v$sql AWR
+-- Purpose: SQL exec stats from gv$sqlarea gv$sql AWR
 -- Created: 20260728  by  huangtingzhong
 --
 -- Usage: ytop -f sql_stat.sql
--- Extracted from sql.sql (v$sqlarea / v$sql / AWR WRH$_SQLSTAT).
+-- Extracted from sql.sql (gv$sqlarea / gv$sql / AWR WRH$_SQLSTAT).
+-- Live sections use GV$ (YAC multi-instance); AWR unchanged.
 
 SET VERIFY OFF
 SET FEEDBACK OFF
 
-UNDEFINE sqlid
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+
@@ -20,7 +20,7 @@ ACCEPT sqlid PROMPT 'Enter sqlid: '
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+
-PROMPT | information from v$sqlarea                |
+PROMPT | information from gv$sqlarea               |
 PROMPT +------------------------------------------------------------------------+
 PROMPT
 
@@ -49,7 +49,8 @@ col  i                      for   a1
 col  SORTS_P_E              for   a10
 col  SEGMENT_NAME           for   a25
 
-SELECT PLAN_HASH_VALUE||'' PHV,
+SELECT TO_CHAR(inst_id) AS i,
+       PLAN_HASH_VALUE||'' PHV,
         CASE
         WHEN EXECUTIONS < 1000 THEN TO_CHAR(EXECUTIONS)
         WHEN EXECUTIONS < 10000 THEN TO_CHAR(ROUND(EXECUTIONS / 1000, 2)) || 'K'
@@ -152,17 +153,19 @@ SELECT PLAN_HASH_VALUE||'' PHV,
         ELSE ROUND(PLSQL_EXEC_TIME / DECODE(EXECUTIONS, 0, 1, EXECUTIONS) / 1000 / 1000 / 60 / 60, 2) || 'h'
     END AS PLSQL_W_P,
     CAST(NULL AS VARCHAR(64)) AS outline
-  FROM v$sqlarea
-where sql_id = '&&sqlid';
+  FROM gv$sqlarea
+ WHERE sql_id = '&&sqlid'
+ ORDER BY inst_id, plan_hash_value;
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+
-PROMPT | information from v$sql                 |
+PROMPT | information from gv$sql                |
 PROMPT +------------------------------------------------------------------------+
 PROMPT
 
 
 SELECT
+    TO_CHAR(s.inst_id) AS i,
     CASE
         WHEN EXECUTIONS < 1000 THEN TO_CHAR(EXECUTIONS)
         WHEN EXECUTIONS < 10000 THEN TO_CHAR(ROUND(EXECUTIONS / 1000, 2)) || 'K'
@@ -270,9 +273,9 @@ SELECT
         ELSE ROUND(PLSQL_EXEC_TIME / DECODE(EXECUTIONS, 0, 1, EXECUTIONS) / 1000 / 1000 / 60 / 60, 2) || 'h'
     END AS PLSQL_W_P,
     SUBSTR(FIRST_LOAD_TIME, 6, 10) || '.' || SUBSTR(LAST_LOAD_TIME, 6, 10) AS f_l_time
-FROM v$sql s
+FROM gv$sql s
 WHERE sql_id = '&&sqlid'
-ORDER BY plan_hash_value;
+ORDER BY s.inst_id, plan_hash_value, child_number;
 
 
 PROMPT

@@ -66,13 +66,14 @@ type Config struct {
 	JdbcPort        int
 	JdbcUser        string
 	JdbcPassword    string
-	JdbcPasswordSet bool   // visited -p/--ssh-password (允许空串)
-	JdbcPortSet     bool   // visited -P/--port
-	ReadScript      string // -r: read/view script content
-	CopyScript      string // -c: copy script (format: "script dest")
-	FindScript      string // -S: find/search scripts (pattern; empty means all)
-	FindScriptSet   bool   // true when -S was passed on the command line
-
+	JdbcPasswordSet bool // visited -p/--ssh-password (允许空串)
+	JdbcPortSet     bool // visited -P/--port
+	// JdbcDefines: -E 专用, 每项 "NAME=VALUE", 转给 yjdbc --define (可重复)
+	JdbcDefines   []string
+	ReadScript    string // -r: read/view script content
+	CopyScript    string // -c: copy script (format: "script dest")
+	FindScript    string // -S: find/search scripts (pattern; empty means all)
+	FindScriptSet bool   // true when -S was passed on the command line
 	// Metric mode (delta/per-second calculation)
 	MetricMode bool // --metric: enable metric collection with delta calculation
 
@@ -460,6 +461,8 @@ func LoadConfig() (*Config, error) {
 	cflags := flag.String("cflags", "", "C compiler flags for -f *.c")
 	ldflags := flag.String("ldflags", "", "C linker flags for -f *.c (e.g. -lm)")
 	python := flag.String("python", "", "Python for -f *.py (default: auto-detect on target)")
+	var jdbcDefines defineList
+	flag.Var(&jdbcDefines, "define", "For -E only: NAME=VALUE substitution (repeatable)")
 
 	if err := flag.CommandLine.Parse(normalizeFindScriptFlagArgs(os.Args)[1:]); err != nil {
 		return nil, err
@@ -564,6 +567,9 @@ func LoadConfig() (*Config, error) {
 	if VisitedAny(visited, "E", "jdbc-enter") && (*jdbcEnter || *jdbcEnterLong) {
 		cfg.JdbcEnter = true
 	}
+	if VisitedAny(visited, "define") && len(jdbcDefines) > 0 {
+		cfg.JdbcDefines = append([]string(nil), jdbcDefines...)
+	}
 	if VisitedAny(visited, "jdbc-jar") && *jdbcJar != "" {
 		cfg.JdbcJar = *jdbcJar
 	}
@@ -635,6 +641,9 @@ func LoadConfig() (*Config, error) {
 	if cfg.JdbcEnter {
 		fillJdbcEnterCLI(cfg, visited, sshHost, sshHostShort, port, portShort,
 			sshUser, sshUserShort, sshPassword, sshPasswordShort)
+		if err := applyJdbcEnterDefaults(cfg); err != nil {
+			return nil, err
+		}
 		cfg.ConnectionMode = "local"
 	}
 
@@ -713,6 +722,9 @@ func LoadConfig() (*Config, error) {
 				return nil, fmt.Errorf("-E -f only supports SQL scripts (.sql), got %q", name)
 			}
 		}
+	}
+	if len(cfg.JdbcDefines) > 0 && !cfg.JdbcEnter {
+		return nil, fmt.Errorf("--define requires -E/--jdbc-enter")
 	}
 
 	// Validate configuration
@@ -1166,7 +1178,7 @@ func (c *Config) Validate() error {
 	if c.JdbcEnter {
 		if c.JdbcHost == "" || !c.JdbcPortSet || c.JdbcPort <= 0 ||
 			c.JdbcUser == "" || !c.JdbcPasswordSet {
-			return fmt.Errorf("-E requires -t <db-host>, -P <db-port>, -u <user>, and -p <password> (-J optional if driver embedded)")
+			return fmt.Errorf("-E needs db host/port/user/password (defaults: -t local-IPv4, -P 1688, -u sys, -p lab default; override with flags; -J optional if driver embedded)")
 		}
 		// 显式 -J 路径在此校验; 未传则运行时 ResolveJdbcDriverJar (embed / JDBC_JAR)
 		if strings.TrimSpace(c.JdbcJar) != "" {
@@ -1262,6 +1274,29 @@ func firstCLIToken(s string) string {
 		return ""
 	}
 	return fields[0]
+}
+
+// defineList 收集可重复的 --define NAME=VALUE.
+type defineList []string
+
+func (d *defineList) String() string {
+	if d == nil {
+		return ""
+	}
+	return strings.Join(*d, ",")
+}
+
+func (d *defineList) Set(v string) error {
+	v = strings.TrimSpace(v)
+	eq := strings.IndexByte(v, '=')
+	if eq <= 0 {
+		return fmt.Errorf("--define expects NAME=VALUE")
+	}
+	if strings.TrimSpace(v[:eq]) == "" {
+		return fmt.Errorf("--define expects NAME=VALUE")
+	}
+	*d = append(*d, v)
+	return nil
 }
 
 // checkSSHCommand checks if ssh command is available

@@ -11,9 +11,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE owner
-UNDEFINE name
-UNDEFINE column_name
 
 col t_t_n        for a25
 col column_id    for a6

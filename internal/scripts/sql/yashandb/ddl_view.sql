@@ -12,9 +12,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE owner
-UNDEFINE viewname
-
 PROMPT
 PROMPT +------------------------------------------------------------------------+
 PROMPT | Get VIEW DDL (DBMS_METADATA.GET_DDL)                                   |

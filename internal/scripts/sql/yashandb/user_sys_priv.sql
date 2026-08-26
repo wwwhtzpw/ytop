@@ -3,7 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/user_sys_priv.sql (rewritten for dba_sys_privs)
 
-UNDEFINE username
 
 col privilege for a40
 col via       for a30

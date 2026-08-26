@@ -3,7 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/user_role.sql
 
-UNDEFINE username
 
 col grantee      for a25
 col granted_role for a30

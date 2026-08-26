@@ -11,8 +11,6 @@ COL status      FOR A16
 COL ref_tab     FOR A64
 COL ref_con     FOR A64
 COL index_name  FOR A64
-UNDEFINE owner
-UNDEFINE tablename
 
 SELECT DISTINCT a.owner || ':' || a.table_name AS owner_name,
        a.constraint_name AS name,

@@ -5,8 +5,6 @@
 -- Params: &&owner, &&objectname (required)
 -- Note: CONNECT BY matches owner+name only (same as Oracle script)
 
-UNDEFINE owner
-UNDEFINE objectname
 
 col lv              for a4
 col o_n             for a40

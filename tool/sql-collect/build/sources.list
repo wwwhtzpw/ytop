@@ -33,14 +33,6 @@
 /Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/replay/ReplayEngine.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/replay/ReplayResultCsv.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/replay/SqlExecutor.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/Lit2Bind.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/SqlMapArgs.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/SqlMapCatalog.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/SqlMapCommand.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/SqlMapDdl.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/SqlMapExec.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/SqlMapIo.java
-/Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/sqlmap/SqlMapVerify.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/util/IniUtil.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/util/JsonBinds.java
 /Users/yihan/tool/develop/yastop/tool/sql-collect/src/com/yashan/sqlcollect/util/NoiseFilter.java

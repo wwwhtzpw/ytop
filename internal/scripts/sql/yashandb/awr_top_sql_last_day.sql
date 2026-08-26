@@ -1,16 +1,43 @@
 -- File Name: awr_top_sql_last_day.sql
--- Purpose: YashanDB Top-N AWR SQL last day with plan and
+-- Purpose: YashanDB Top-N AWR SQL last N days with plan and objects
 -- Created: 20260311  by  huangtingzhong
-
+-- Updated: 20260809 by huangtingzhong (LITERAL SQL via CLOB; no 32K truncate)
+-- Updated: 20260809 by huangtingzhong (GET_PER display -> AVG_GETS)
+-- Updated: 20260809 by huangtingzhong (ACCEPT days/username; schema filter)
+-- Updated: 20260809 by huangtingzhong (ACCEPT exclude_user; schema exclude)
+-- Updated: 20260809 by huangtingzhong (username/exclude_user CSV multi-schema)
+--
+-- Params:
+--   days         : last N calendar days (Enter=1, aka last day); must be > 0
+--   username     : include schema(s), comma-separated (Enter=no filter; exact, CI)
+--   exclude_user : exclude schema(s), comma-separated (Enter=no exclude; exact, CI)
 --          plan, v$sql/v$sqlstats, and object/table/index info per SQL_ID via DBMS_OUTPUT. No DDL.
--- Created: 20260311 by huangtingzhong
 -- YashanDB: TO_CHAR plan_hash_value; DBMS_OUTPUT in nested FOR loops.
 
 SET SERVEROUTPUT ON
 
+
+PROMPT
+PROMPT +------------------------------------------------------------------------+
+PROMPT | AWR Top-N SQL (last N days)                                            |
+PROMPT | days         : Enter = 1 (last day); N = last N calendar days          |
+PROMPT | username     : Enter = all; else include schema(s), comma-separated    |
+PROMPT | exclude_user : Enter = none; else exclude schema(s), comma-separated   |
+PROMPT +------------------------------------------------------------------------+
+PROMPT
+
+ACCEPT days PROMPT 'Enter days (Enter=1 last day): '
+ACCEPT username PROMPT 'Enter username/schema(s) (Enter=no filter, CSV ok): '
+ACCEPT exclude_user PROMPT 'Enter exclude_user(s) (Enter=no exclude, CSV ok): '
+
 DECLARE
-    v_days      NUMBER        := 1;     -- last N days
-    v_top_n     NUMBER        := 10;    -- top N SQL_ID per day by CPU
+    v_days_in   VARCHAR2(64)   := TRIM('&&days');
+    v_user_raw  VARCHAR2(4000) := TRIM('&&username');
+    v_excl_raw  VARCHAR2(4000) := TRIM('&&exclude_user');
+    v_user      VARCHAR2(4000);         -- normalized CSV include (NULL=all)
+    v_excl      VARCHAR2(4000);         -- normalized CSV exclude (NULL=none)
+    v_days      NUMBER;                 -- last N days (default 1)
+    v_top_n     NUMBER        := 10;    -- top N SQL_ID by CPU
     v_sql_id    VARCHAR2(64);
     v_line      VARCHAR2(32767);
     v_count     NUMBER := 0;
@@ -60,6 +87,7 @@ DECLARE
     g_plan_rows    t_plan_tab;
 
     -- last-day TOP SQL by CPU, distinct SQL_ID
+    -- schema filter: v_user/v_excl are normalized CSV (UPPER, no spaces); NULL = no filter
     CURSOR c_top_sql IS
         WITH snap_range AS (
             SELECT MIN(s.SNAP_ID) AS bid,
@@ -79,6 +107,12 @@ DECLARE
             FROM SYS.WRH$_SQLSTAT d
             JOIN snap_range sr ON d.SNAP_ID > sr.bid AND d.SNAP_ID <= sr.eid
              AND d.DBID = sr.DBID AND d.INSTANCE_NUMBER = sr.INSTANCE_NUMBER
+            WHERE (v_user IS NULL
+                   OR INSTR(',' || v_user || ',',
+                            ',' || UPPER(TRIM(d.parsing_schema_name)) || ',') > 0)
+              AND (v_excl IS NULL
+                   OR INSTR(',' || v_excl || ',',
+                            ',' || UPPER(TRIM(d.parsing_schema_name)) || ',') = 0)
             GROUP BY d.SQL_ID
             HAVING NVL(SUM(d.CPU_TIME_DELTA), 0) > 0 OR NVL(SUM(d.BUFFER_GETS_DELTA), 0) > 0
         ),
@@ -100,6 +134,27 @@ DECLARE
         WHILE v_off <= v_len LOOP
             DBMS_OUTPUT.PUT_LINE(SUBSTR(s, v_off, v_max));
             v_off := v_off + v_max;
+        END LOOP;
+    END;
+
+    -- UTF8: SUBSTR into VARCHAR2(4000) may exceed byte limit; keep emit chunk small
+    PROCEDURE put_clob(p_text IN CLOB) IS
+        c_chunk CONSTANT PLS_INTEGER := 1000;
+        v_len   NUMBER;
+        v_off   NUMBER := 1;
+        v_buf   VARCHAR2(4000);
+    BEGIN
+        IF p_text IS NULL THEN
+            RETURN;
+        END IF;
+        v_len := NVL(DBMS_LOB.GETLENGTH(p_text), 0);
+        IF v_len = 0 THEN
+            RETURN;
+        END IF;
+        WHILE v_off <= v_len LOOP
+            v_buf := DBMS_LOB.SUBSTR(p_text, LEAST(c_chunk, v_len - v_off + 1), v_off);
+            DBMS_OUTPUT.PUT_LINE(v_buf);
+            v_off := v_off + c_chunk;
         END LOOP;
     END;
 
@@ -249,7 +304,68 @@ DECLARE
 
 BEGIN
     DBMS_OUTPUT.ENABLE(1000000);
-    DBMS_OUTPUT.PUT_LINE('collect_top_sql: start, v_top_n=' || v_top_n);
+
+    -- parse days: Enter -> 1; reject non-numeric / <= 0
+    -- Yashan TO_NUMBER on bad text may raise YAS-00008 (not VALUE_ERROR)
+    IF v_days_in IS NULL OR LENGTH(v_days_in) = 0 THEN
+        v_days := 1;
+    ELSE
+        BEGIN
+            v_days := TO_NUMBER(v_days_in);
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR(30301,
+                    'Invalid days="' || NVL(v_days_in, '')
+                    || '"; expect positive number or Enter');
+        END;
+    END IF;
+    IF v_days IS NULL OR v_days <= 0 THEN
+        RAISE_APPLICATION_ERROR(30301,
+            'Invalid days=' || NVL(TO_CHAR(v_days), 'NULL') || '; must be > 0');
+    END IF;
+
+    -- normalize CSV: UPPER, trim tokens, drop empties/dupes
+    DECLARE
+        PROCEDURE norm_csv(p_in IN VARCHAR2, p_out OUT VARCHAR2) IS
+            v_rest VARCHAR2(4000);
+            v_tok  VARCHAR2(128);
+            v_out  VARCHAR2(4000) := NULL;
+            v_pos  NUMBER;
+        BEGIN
+            p_out := NULL;
+            IF p_in IS NULL OR LENGTH(TRIM(p_in)) = 0 THEN
+                RETURN;
+            END IF;
+            v_rest := UPPER(TRIM(p_in)) || ',';
+            LOOP
+                v_pos := INSTR(v_rest, ',');
+                EXIT WHEN v_pos = 0 OR v_rest IS NULL;
+                v_tok := TRIM(SUBSTR(v_rest, 1, v_pos - 1));
+                IF v_pos < LENGTH(v_rest) THEN
+                    v_rest := SUBSTR(v_rest, v_pos + 1);
+                ELSE
+                    v_rest := NULL;
+                END IF;
+                IF v_tok IS NOT NULL AND LENGTH(v_tok) > 0 THEN
+                    IF v_out IS NULL THEN
+                        v_out := v_tok;
+                    ELSIF INSTR(',' || v_out || ',', ',' || v_tok || ',') = 0 THEN
+                        v_out := v_out || ',' || v_tok;
+                    END IF;
+                END IF;
+            END LOOP;
+            p_out := v_out;
+        END;
+    BEGIN
+        norm_csv(v_user_raw, v_user);
+        norm_csv(v_excl_raw, v_excl);
+    END;
+
+    put_line('collect_top_sql: start'
+        || ' days=' || TO_CHAR(v_days)
+        || ' user=' || NVL(v_user, 'ALL')
+        || ' excl=' || NVL(v_excl, 'NONE')
+        || ' top_n=' || TO_CHAR(v_top_n));
 
     FOR rec IN c_top_sql LOOP
         v_sql_id := rec.SQL_ID;
@@ -365,23 +481,31 @@ BEGIN
         put_line('LITERAL SQL');
         put_line('****************************************************************************************');
 
-        -- LITERAL SQL: SQL_FULLTEXT up to 32K, chunked put_line
+        -- LITERAL SQL: full sql_fulltext as CLOB (no VARCHAR2 32K cap)
         DECLARE
-            lv_sql_text VARCHAR2(32000);
+            lv_sql_text CLOB;
             lv_schema   VARCHAR2(128);
+            lv_len      NUMBER;
         BEGIN
-            SELECT parsing_schema_name, SUBSTR(SQL_FULLTEXT, 1, 32000)
+            SELECT parsing_schema_name, sql_fulltext
               INTO lv_schema, lv_sql_text
-              FROM V$SQL
-             WHERE SQL_ID = v_sql_id AND ROWNUM = 1;
-            put_line( 'Schema: ' || lv_schema);
-            put_line( lv_sql_text );
-            put_line( '--------------------------------------------------------');
+              FROM (
+                SELECT parsing_schema_name, sql_fulltext
+                  FROM V$SQL
+                 WHERE SQL_ID = v_sql_id
+                   AND sql_fulltext IS NOT NULL
+                 ORDER BY DBMS_LOB.GETLENGTH(sql_fulltext) DESC NULLS LAST
+              )
+             WHERE ROWNUM = 1;
+            lv_len := NVL(DBMS_LOB.GETLENGTH(lv_sql_text), 0);
+            put_line('Schema: ' || lv_schema || '  chars=' || TO_CHAR(lv_len));
+            put_clob(lv_sql_text);
+            put_line('--------------------------------------------------------');
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
-                put_line( 'Schema: (not found)');
-                put_line( '(SQL text not in V$SQL)');
-                put_line( '--------------------------------------------------------');
+                put_line('Schema: (not found)');
+                put_line('(SQL text not in V$SQL)');
+                put_line('--------------------------------------------------------');
         END;
 
         put_line( '');
@@ -541,7 +665,7 @@ BEGIN
         put_line( '+------------------------------------------------------------------------+');
         put_line( '');
         -- column headers with short names
-        put_line(RPAD('PHV',10) || ' ' || RPAD('EXEC',8) || ' ' || RPAD('CPU_PER',10) || ' ' || RPAD('ELA_PER',10) || ' ' || RPAD('DISK_PER',9) || ' ' || RPAD('GET_PER',9) || ' ' || RPAD('ROWS_PER',9) || ' ' || RPAD('ROW_FETCH',10) || ' ' || RPAD('APP_PER',10) || ' ' || RPAD('CON_WPER',10) || ' ' || RPAD('CLU_PER',10) || ' ' || RPAD('UIO_PER',10) || ' ' || RPAD('PLSQL_PER',10) || ' ' || RPAD('OUTLINE',18));
+        put_line(RPAD('PHV',10) || ' ' || RPAD('EXEC',8) || ' ' || RPAD('CPU_PER',10) || ' ' || RPAD('ELA_PER',10) || ' ' || RPAD('DISK_PER',9) || ' ' || RPAD('AVG_GETS',9) || ' ' || RPAD('ROWS_PER',9) || ' ' || RPAD('ROW_FETCH',10) || ' ' || RPAD('APP_PER',10) || ' ' || RPAD('CON_WPER',10) || ' ' || RPAD('CLU_PER',10) || ' ' || RPAD('UIO_PER',10) || ' ' || RPAD('PLSQL_PER',10) || ' ' || RPAD('OUTLINE',18));
 
         -- v$sqlarea raw values formatted on output
         FOR r IN (
@@ -583,7 +707,7 @@ BEGIN
         put_line( '| information from v$sql                 |');
         put_line( '+------------------------------------------------------------------------+');
         put_line( '');
-        put_line(RPAD('EXEC',8) || ' ' || RPAD('PHV',10) || ' ' || RPAD('C',3) || ' ' || RPAD('USERNAME',15) || ' ' || RPAD('CPU_PER',10) || ' ' || RPAD('ELA_PER',10) || ' ' || RPAD('DISK_PER',9) || ' ' || RPAD('GET_PER',9) || ' ' || RPAD('ROWS_PER',9) || ' ' || RPAD('ROW_FETCH',10) || ' ' || RPAD('APP_PER',10) || ' ' || RPAD('CON_PER',10) || ' ' || RPAD('CLU_PER',10) || ' ' || RPAD('UIO_PER',10) || ' ' || RPAD('PLSQL_PER',10) || ' ' || RPAD('F_L_TIME',12));
+        put_line(RPAD('EXEC',8) || ' ' || RPAD('PHV',10) || ' ' || RPAD('C',3) || ' ' || RPAD('USERNAME',15) || ' ' || RPAD('CPU_PER',10) || ' ' || RPAD('ELA_PER',10) || ' ' || RPAD('DISK_PER',9) || ' ' || RPAD('AVG_GETS',9) || ' ' || RPAD('ROWS_PER',9) || ' ' || RPAD('ROW_FETCH',10) || ' ' || RPAD('APP_PER',10) || ' ' || RPAD('CON_PER',10) || ' ' || RPAD('CLU_PER',10) || ' ' || RPAD('UIO_PER',10) || ' ' || RPAD('PLSQL_PER',10) || ' ' || RPAD('F_L_TIME',12));
 
         FOR r2 IN (
             SELECT TO_CHAR(PLAN_HASH_VALUE) AS plan_hash_value, child_number||'' AS c, PARSING_SCHEMA_NAME AS username,
@@ -625,10 +749,12 @@ BEGIN
 
         put_line( '');
         put_line( '+------------------------------------------------------------------------+');
-        put_line( '| information from awr   sysdate-' || v_days || '                                       |');
+        put_line( '| information from awr  sysdate-' || v_days
+            || ' user=' || NVL(v_user, 'ALL')
+            || ' excl=' || NVL(v_excl, 'NONE'));
         put_line( '+------------------------------------------------------------------------+');
         put_line( '');
-        put_line(RPAD('END_TIME',8) || ' ' || RPAD('I',2) || ' ' || RPAD('USERNAME',15) || ' ' || RPAD('PHV',10) || ' ' || RPAD('EXEC',8) || ' ' || RPAD('CPU_PER',10) || ' ' || RPAD('ELA_PER',10) || ' ' || RPAD('DISK_PER',9) || ' ' || RPAD('GET_PER',9) || ' ' || RPAD('ROWS_PER',9) || ' ' || RPAD('ROW_FETCH',10) || ' ' || RPAD('WRITE_PER',9) || ' ' || RPAD('IOWAIT_PER',10) || ' ' || RPAD('SORT_PER',10) || ' ' || RPAD('APP_PER',10) || ' ' || RPAD('CON_PER',10) || ' ' || RPAD('CLU_PER',10) || ' ' || RPAD('PLSQL_PER',10));
+        put_line(RPAD('END_TIME',8) || ' ' || RPAD('I',2) || ' ' || RPAD('USERNAME',15) || ' ' || RPAD('PHV',10) || ' ' || RPAD('EXEC',8) || ' ' || RPAD('CPU_PER',10) || ' ' || RPAD('ELA_PER',10) || ' ' || RPAD('DISK_PER',9) || ' ' || RPAD('AVG_GETS',9) || ' ' || RPAD('ROWS_PER',9) || ' ' || RPAD('ROW_FETCH',10) || ' ' || RPAD('WRITE_PER',9) || ' ' || RPAD('IOWAIT_PER',10) || ' ' || RPAD('SORT_PER',10) || ' ' || RPAD('APP_PER',10) || ' ' || RPAD('CON_PER',10) || ' ' || RPAD('CLU_PER',10) || ' ' || RPAD('PLSQL_PER',10));
 
         FOR awr IN (
             SELECT TO_CHAR(b.END_INTERVAL_TIME, 'dd hh24') AS end_time,
@@ -654,6 +780,12 @@ BEGIN
                AND a.snap_id = b.snap_id
                AND b.END_INTERVAL_TIME > SYSDATE - v_days
                AND a.instance_number = b.instance_number
+               AND (v_user IS NULL
+                    OR INSTR(',' || v_user || ',',
+                             ',' || UPPER(TRIM(a.parsing_schema_name)) || ',') > 0)
+               AND (v_excl IS NULL
+                    OR INSTR(',' || v_excl || ',',
+                             ',' || UPPER(TRIM(a.parsing_schema_name)) || ',') = 0)
              ORDER BY 1
         ) LOOP
             v_line := RPAD(SUBSTR(NVL(awr.end_time,' '),1,8),8) || ' '

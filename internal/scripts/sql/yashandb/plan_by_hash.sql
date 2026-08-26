@@ -6,8 +6,6 @@
 -- Note: uses PLAN_HASH_VALUE (Oracle old script used HASH_VALUE)
 --       One row per (sql_id, PHV, id): ROW_NUMBER collapse duplicates
 
-UNDEFINE plan_hash_value
-UNDEFINE sqlid
 
 col sql_id   for a15
 col phv      for a12

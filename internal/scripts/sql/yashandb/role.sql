@@ -3,7 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/role.sql
 
-UNDEFINE role_name
 
 col role           for a40
 col role_id        for a10

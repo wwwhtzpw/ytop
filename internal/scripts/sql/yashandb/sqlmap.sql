@@ -1,9 +1,10 @@
 -- File Name: sqlmap.sql
 -- Purpose: View YashanDB SQLMAP (list all + look up by sqlmap name or sql_id)
 -- Created: 20260731  by  huangtingzhong
--- Updated: 20260803 by huangtingzhong (ASCII-safe preview; list row isolation)
+-- Updated: 20260814 by huangtingzhong (keep --define; no UNDEFINE wipe)
 --
 -- Usage: ytop/yasql -f sqlmap.sql   (prompts for sql_id)
+--        ytop -E -f sqlmap.sql --define sqlid=   (blank = list all)
 --   blank            : list all SQLMAPs (lookup mode off)
 --   <sqlmap name>    : show that sqlmap's definition directly from SYS.SQL_MAP$ (no v$sql needed)
 --   <sql_id>         : show sqlmaps covering that SQL, via v$sql.HASH_VALUE (needs the SQL in v$sql)
@@ -20,8 +21,6 @@
 --     printable ASCII; other bytes become '?'. One bad map must not abort the whole list.
 
 SET SERVEROUTPUT ON
-
-UNDEFINE sqlid
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+

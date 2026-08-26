@@ -1,6 +1,7 @@
 -- File Name: outline_create_by_sqlid.sql
 -- Purpose: Create OUTLINE from sql_id + hint (ON sql_id USING HINT, no SQL text change)
 -- Created: 20260801  by  huangtingzhong
+-- Updated: 20260809 by huangtingzhong (preview sql_fulltext via CLOB; avoid VARCHAR2 32K)
 --
 -- Usage: ytop/yasql -f outline_create_by_sqlid.sql
 --   source_sql_id : sql_id of the source SQL in v$sql
@@ -18,8 +19,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE source_sqlid
-UNDEFINE hint
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+
@@ -33,7 +32,7 @@ ACCEPT hint PROMPT 'Enter hint body (e.g. FULL(t), without /*+ */): '
 DECLARE
   v_sqlid     VARCHAR2(32)   := TRIM('&&source_sqlid');
   v_hint      VARCHAR2(4000) := TRIM('&&hint');
-  v_src       VARCHAR2(32767);
+  v_src       CLOB;
   v_name      VARCHAR2(128);
   v_exists    NUMBER;
   v_dummy     NUMBER;
@@ -65,7 +64,16 @@ BEGIN
     RAISE_APPLICATION_ERROR(30204, 'hint is empty; provide hint body e.g. FULL(t)');
   END IF;
 
-  SELECT sql_fulltext INTO v_src FROM v$sql WHERE sql_id = v_sqlid AND ROWNUM = 1;
+  SELECT sql_fulltext
+    INTO v_src
+    FROM (
+      SELECT sql_fulltext
+        FROM v$sql
+       WHERE sql_id = v_sqlid
+         AND sql_fulltext IS NOT NULL
+       ORDER BY DBMS_LOB.GETLENGTH(sql_fulltext) DESC NULLS LAST
+    )
+   WHERE ROWNUM = 1;
 
   v_name := 'ol_' || v_sqlid || '_' || TO_CHAR(SYSTIMESTAMP, 'YYYYMMDDHH24MISS');
   BEGIN
@@ -91,7 +99,8 @@ BEGIN
   DBMS_OUTPUT.PUT_LINE('OUTLINE created: ' || v_name);
   DBMS_OUTPUT.PUT_LINE('  source sql_id : ' || v_sqlid);
   DBMS_OUTPUT.PUT_LINE('  hint          : /*+ ' || v_hint || ' */');
-  DBMS_OUTPUT.PUT_LINE('  SQL preview   : ' || SUBSTR(v_src, 1, 100));
+  DBMS_OUTPUT.PUT_LINE(
+    '  SQL preview   : ' || SUBSTR(DBMS_LOB.SUBSTR(v_src, 100, 1), 1, 100));
   DBMS_OUTPUT.PUT_LINE('Rollback DDL : DROP OUTLINE ' || v_name || ';');
   DBMS_OUTPUT.PUT_LINE('Activate     : ALTER SESSION SET use_stored_outlines = TRUE;');
   DBMS_OUTPUT.PUT_LINE('Scripts      : outline.sql / outline_enable.sql / outline_disable.sql / outline_drop.sql');

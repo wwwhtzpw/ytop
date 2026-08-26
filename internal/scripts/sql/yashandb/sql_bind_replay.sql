@@ -22,13 +22,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE sqlid
-UNDEFINE child
-UNDEFINE action
-UNDEFINE confirm
-UNDEFINE schema
-UNDEFINE show_rows
-UNDEFINE max_rows
 
 ACCEPT sqlid PROMPT 'Enter sql_id (required): '
 ACCEPT child PROMPT 'Enter child_number (empty=prefer captured binds): '

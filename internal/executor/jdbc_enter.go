@@ -221,6 +221,14 @@ func (e *Executor) EnterJdbcShell() (exitCode int, err error) {
 		args = append(args, "--script", scriptPath, "--batch")
 	}
 
+	for _, d := range cfg.JdbcDefines {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		args = append(args, "--define", d)
+	}
+
 	cmd := exec.Command(javaPath, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

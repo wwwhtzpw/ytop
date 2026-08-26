@@ -10,7 +10,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE mapname
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+

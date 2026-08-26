@@ -3,7 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/user_quota.sql
 
-UNDEFINE username
 
 col username        for a20
 col tablespace_name for a16

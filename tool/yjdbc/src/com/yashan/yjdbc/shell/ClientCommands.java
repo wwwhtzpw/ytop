@@ -27,12 +27,15 @@ import java.util.regex.Pattern;
 
 /**
  * 客户端命令: @/@@/START / ? (peek) / # (edit-temp-run) / DESC / COL / DEFINE / ACCEPT /
- * SET / SHOW / PROMPT / SPOOL / CLEAR / EXEC / WHENEVER / EXIT.
+ * SET / SHOW / PROMPT / HELP / SPOOL / CLEAR / EXEC / WHENEVER / EXIT.
  */
 public final class ClientCommands {
     private static final int MAX_NEST = 32;
     private static final Pattern DESC = Pattern.compile(
             "(?i)^\\s*DESC(?:RIBE)?\\s+([\\w.$#\"]+)\\s*;?\\s*$");
+    /** HELP [topic]; topic: usage|index (default overview). */
+    private static final Pattern HELP_CMD = Pattern.compile(
+            "(?i)^\\s*HELP(?:\\s+(\\S+))?\\s*;?\\s*$");
     private static final Pattern SET_ANY = Pattern.compile(
             "(?i)^\\s*SET\\s+(.+)$");
     private static final Pattern SHOW = Pattern.compile(
@@ -146,6 +149,14 @@ public final class ClientCommands {
         return pendingExitCode == null ? 0 : pendingExitCode.intValue();
     }
 
+    /** &/&& 替换失败: 设非 0 退出并按 WHENEVER OSERROR 处理. */
+    private void failSubstitution() {
+        if (pendingExitCode == null) {
+            pendingExitCode = Integer.valueOf(1);
+        }
+        onOsError();
+    }
+
     /**
      * 若为客户端命令则处理并返回 true; 否则返回 false 交由 SQL 执行.
      */
@@ -161,6 +172,11 @@ public final class ClientCommands {
         boolean quiet = depth > 0 || session.config().batch || scriptDir != null;
 
         if (REM.matcher(s).matches()) {
+            return true;
+        }
+        Matcher helpCmd = HELP_CMD.matcher(s);
+        if (helpCmd.matches()) {
+            handleHelp(helpCmd.group(1));
             return true;
         }
         Matcher whenever = WHENEVER.matcher(s);
@@ -233,10 +249,11 @@ public final class ClientCommands {
             }
             // sqlplus: PROMPT 内 &var 亦替换
             String expanded = session.config().substitute(msg, promptIn, out, err);
-            if (expanded != null) {
-                msg = expanded;
+            if (expanded == null) {
+                failSubstitution();
+                return true;
             }
-            session.config().println(out, msg);
+            session.config().println(out, expanded);
             return true;
         }
 
@@ -457,6 +474,7 @@ public final class ClientCommands {
         SessionConfig.ExpandResult expanded =
                 session.config().expandForExec(spec.sql, promptIn, out, err);
         if (expanded == null) {
+            failSubstitution();
             return;
         }
         boolean ok = executor.execute(expanded.sql, expanded.binds, spec.verticalOnce);
@@ -566,6 +584,236 @@ public final class ClientCommands {
             }
         }
         return p;
+    }
+
+    private void handleHelp(String topic) {
+        String t = topic == null ? "" : topic.trim().toLowerCase(Locale.ROOT);
+        if (t.isEmpty() || "yjdbc".equals(t) || "overview".equals(t)
+                || "usage".equals(t) || "shell".equals(t) || "all".equals(t)) {
+            printYjdbcHelpOverview(out);
+            return;
+        }
+        if ("index".equals(t) || "topics".equals(t)) {
+            out.println("HELP topics (also: HELP <section>):");
+            out.println("  HELP                 full categorized help (default)");
+            out.println("  HELP INDEX           this list");
+            out.println("  HELP BASICS          prompt / SQL / txn / exit");
+            out.println("  HELP RESULT          table/vertical display, COL, limits");
+            out.println("  HELP SET             SET options");
+            out.println("  HELP COLUMN|COL      COLUMN formatting");
+            out.println("  HELP DEFINE          DEFINE/ACCEPT/&var/PROMPT");
+            out.println("  HELP SCRIPT          script modes: view(?) / edit(#) / run(@)");
+            out.println("  HELP VIEW|PEEK       view script only (?)");
+            out.println("  HELP RUN|START       run script (@ @@ START)");
+            out.println("  HELP BIND            VARIABLE/PRINT/BINDVAR");
+            out.println("  HELP BUFFER          LIST/RUN buffer / CHANGE/...");
+            out.println("  HELP REPORT          TTITLE/BREAK/COMPUTE");
+            out.println("  HELP SESSION         SPOOL/SHOW/CONNECT/HOST/WHENEVER");
+            out.println("  HELP SLASH           \\ slash built-ins");
+            out.println("  HELP EDIT            #script edit-run mode (same as HELP SCRIPT)");
+            out.println();
+            out.println("Slash catalog: \\help");
+            return;
+        }
+        if ("basics".equals(t) || "sql".equals(t)) {
+            printHelpBasics(out);
+            return;
+        }
+        if ("result".equals(t) || "display".equals(t) || "output".equals(t)) {
+            printHelpResult(out);
+            return;
+        }
+        if ("set".equals(t)) {
+            printHelpSet(out);
+            return;
+        }
+        if ("column".equals(t) || "col".equals(t)) {
+            printHelpColumn(out);
+            return;
+        }
+        if ("define".equals(t) || "prompt".equals(t) || "accept".equals(t)
+                || "subst".equals(t) || "substitution".equals(t)) {
+            printHelpDefine(out);
+            return;
+        }
+        if ("script".equals(t) || "scripts".equals(t) || "@".equals(t) || "at".equals(t)
+                || "view".equals(t) || "peek".equals(t) || "edit".equals(t)
+                || "run".equals(t) || "start".equals(t)) {
+            printHelpScript(out);
+            return;
+        }
+        if ("bind".equals(t) || "variable".equals(t) || "var".equals(t) || "print".equals(t)) {
+            printHelpBind(out);
+            return;
+        }
+        if ("buffer".equals(t) || "buf".equals(t) || "list".equals(t)) {
+            printHelpBuffer(out);
+            return;
+        }
+        if ("report".equals(t) || "ttitle".equals(t) || "break".equals(t)
+                || "compute".equals(t)) {
+            printHelpReport(out);
+            return;
+        }
+        if ("session".equals(t) || "spool".equals(t) || "show".equals(t)
+                || "connect".equals(t) || "host".equals(t) || "whenever".equals(t)) {
+            printHelpSession(out);
+            return;
+        }
+        if ("slash".equals(t) || "sqlmap".equals(t) || "\\".equals(t) || "meta".equals(t)) {
+            printHelpSlash(out);
+            return;
+        }
+        out.println("Error: unknown HELP topic: " + topic);
+        out.println("Try: HELP  |  HELP INDEX  |  HELP SET  |  HELP SCRIPT  |  HELP SLASH");
+        out.println("Slash help: \\help");
+    }
+
+    /** Client HELP: categorized in-shell feature guide (no ytop launch flags). */
+    static void printYjdbcHelpOverview(PrintStream out) {
+        out.println("yjdbc help (in-shell features)");
+        out.println("Tip: HELP INDEX  |  HELP <section>  e.g. HELP SET / HELP SCRIPT / HELP SLASH");
+        out.println();
+        printHelpBasics(out);
+        out.println();
+        printHelpResult(out);
+        out.println();
+        printHelpSet(out);
+        out.println();
+        printHelpColumn(out);
+        out.println();
+        printHelpDefine(out);
+        out.println();
+        printHelpScript(out);
+        out.println();
+        printHelpBind(out);
+        out.println();
+        printHelpBuffer(out);
+        out.println();
+        printHelpReport(out);
+        out.println();
+        printHelpSession(out);
+        out.println();
+        printHelpSlash(out);
+    }
+
+    static void printHelpBasics(PrintStream out) {
+        out.println("[Basics]");
+        out.println("  Prompt: YJDBC>   (continuation line:      > )");
+        out.println("  SQL terminator: ;");
+        out.println("  Vertical one-shot: end with \\G  (like MySQL)");
+        out.println("  PL/SQL block: end with a line containing only /");
+        out.println("  Transaction: autocommit=false; use COMMIT / ROLLBACK");
+        out.println("  Exit: EXIT | QUIT  (bare: exit 0, no auto-commit)");
+        out.println("  WHENEVER SQLERROR|OSERROR EXIT|CONTINUE [status] [COMMIT|ROLLBACK|NONE]");
+    }
+
+    static void printHelpResult(PrintStream out) {
+        out.println("[Result display]");
+        out.println("  Default: Oracle-style table (header + rows)");
+        out.println("  Vertical: SET VERTICAL ON | SET DISPLAY VERTICAL");
+        out.println("            SET VERTICAL OFF | SET DISPLAY TABLE");
+        out.println("  Also: statement ending with \\G forces vertical for that result");
+        out.println("  COLUMN/COL controls width, wrap, heading, noprint (see HELP COLUMN)");
+        out.println("  SET HEADING / PAGESIZE / LINESIZE / FEEDBACK / TIMING / NULL / WRAP");
+        out.println("  SET COLSEP / UNDERLINE / TRIMOUT / NUMWIDTH / NUMFORMAT");
+        out.println("  Row limit: default max 10000 rows (truncate notice if exceeded)");
+        out.println("  SET SERVEROUTPUT ON: print DBMS_OUTPUT after statements");
+    }
+
+    static void printHelpSet(PrintStream out) {
+        out.println("[SET]  (SHOW <option> / SHOW ALL / SHOW WHENEVER / SHOW USER / SHOW BINDVAR)");
+        out.println("  ECHO FEEDBACK HEADING PAGESIZE LINESIZE TIMING VERIFY");
+        out.println("  DEFINE (ON|OFF|char)  ESCAPE  NULL  TERMOUT  AUTOCOMMIT");
+        out.println("  SERVEROUTPUT  LONG  LONGCHUNKSIZE  ARRAYSIZE");
+        out.println("  TRIMOUT TRIMSPOOL COLSEP UNDERLINE WRAP NUMWIDTH NUMFORMAT HOST");
+        out.println("  VERTICAL / DISPLAY (VERTICAL|TABLE)  BINDVAR (ON|OFF)");
+        out.println("  Unsupported SET -> stderr: unsupported SET ...");
+    }
+
+    static void printHelpColumn(PrintStream out) {
+        out.println("[COLUMN / COL]");
+        out.println("  COL col FORMAT An|999...  HEADING text  NOPRINT|PRINT");
+        out.println("  JUSTIFY LEFT|CENTER|RIGHT");
+        out.println("  TRUNCATED | WRAPPED | WORD_WRAPPED");
+        out.println("  NEW_VALUE var   OLD_VALUE var   (last/prev row into &var)");
+        out.println("  COL col CLEAR   |   CLEAR COLUMNS   |   COL  (list formats)");
+    }
+
+    static void printHelpDefine(PrintStream out) {
+        out.println("[DEFINE / PROMPT / ACCEPT / substitution]");
+        out.println("  DEFINE name=value    UNDEFINE name");
+        out.println("  &var  &&var  &1 &2...   (positional from @script args)");
+        out.println("  SET DEFINE ON|OFF|char   SET VERIFY ON|OFF (old/new)");
+        out.println("  PROMPT text   (also expands &var)");
+        out.println("  REM comment");
+        out.println("  ACCEPT var [PROMPT text] [DEFAULT val] [HIDE] [NUMBER]");
+        out.println("  Example: COLUMN sid NEW_VALUE last_sid then SELECT ... AS sid");
+    }
+
+    static void printHelpScript(PrintStream out) {
+        out.println("[Scripts]");
+        out.println("  ?file.sql                 VIEW: print script only (no execute)");
+        out.println("  #file.sql [args...]       EDIT: temp copy via editor; run if changed; no write-back");
+        out.println("  @file.sql [args...]       RUN: execute; args -> &1 &2 ...");
+        out.println("  @@file.sql [args...]      RUN: like @, prefer caller script dir first");
+        out.println("  START file.sql [args...]  RUN: same as @");
+        out.println("  Path: abs -> (@@: caller dir) -> embed SQL -> cwd");
+        out.println("  Engine variant: foo_yjdbc.sql preferred under -E when present");
+    }
+
+    static void printHelpBind(PrintStream out) {
+        out.println("[VARIABLE / PRINT / binds]");
+        out.println("  VARIABLE|VAR name NUMBER|VARCHAR2[(n)]|CHAR[(n)]|REFCURSOR");
+        out.println("  PRINT name             show bind / open refcursor rows");
+        out.println("  :name in SQL -> JDBC IN bind when declared");
+        out.println("  EXEC :name := literal  client-side assign (not for REFCURSOR)");
+        out.println("  REFCURSOR: OPEN in PL/SQL then PRINT rc; or proc(:rc) OUT");
+        out.println("  SET BINDVAR ON: &var -> JDBC ? for DQL/DML (default ON; PL/SQL blocks stay literal)");
+        out.println("                 OFF = always literal subst");
+    }
+
+    static void printHelpBuffer(PrintStream out) {
+        out.println("[SQL buffer]");
+        out.println("  LIST|L   RUN|R   / (empty buffer = re-run last)");
+        out.println("  CHANGE|C   DEL   APPEND|A   INPUT|I");
+        out.println("  GET file   SAVE file   CLEAR BUFFER");
+    }
+
+    static void printHelpReport(PrintStream out) {
+        out.println("[Report]");
+        out.println("  TTITLE / BTITLE text");
+        out.println("  BREAK ON col [SKIP n|PAGE]");
+        out.println("  COMPUTE SUM|COUNT|AVG|MIN|MAX OF col ON break|REPORT");
+        out.println("  CLEAR BREAKS | CLEAR COMPUTES");
+    }
+
+    static void printHelpSession(PrintStream out) {
+        out.println("[Session / OS / spool]");
+        out.println("  SPOOL file [CREATE|REPLACE|APPEND]   SPOOL OFF");
+        out.println("    (default REPLACE; use APPEND to append)");
+        out.println("  CLEAR COLUMNS | CLEAR SCREEN | CLEAR BREAKS|COMPUTES|BUFFER");
+        out.println("  EXEC|EXECUTE plsql-or-assign");
+        out.println("  DESC|DESCRIBE name");
+        out.println("  HOST|! cmd             OS command (!ls and ! ls both OK)");
+        out.println("  PAUSE [text]");
+        out.println("  CONNECT user/pass[@host:port/db]   DISCONNECT");
+        out.println("  SHOW USER | SHOW ALL | SHOW <SET-option> | SHOW WHENEVER | SHOW BINDVAR");
+        out.println("  HELP [section]     this help system");
+    }
+
+    static void printHelpSlash(PrintStream out) {
+        out.println("[Slash commands]  (whole line starts with \\ , SQL buffer must be empty)");
+        out.println("  Not ClientCommands; handled by SlashRegistry.");
+        out.println("  \\help                 list slash commands by category");
+        out.println("  \\help <cmd>           e.g. \\help sqlmap");
+        out.println("  \\help <cmd> <topic>   e.g. \\help sqlmap create");
+        out.println("  \\help categories | \\help category <name> | \\help search <kw>");
+        out.println("  \\?                    alias of \\help");
+        out.println("  \\sqlmap ...           SQLMAP toolkit (create/list/show/drop/...");
+        out.println("                        export/genbind/genexec/lit2bind/perf/verify)");
+        out.println("  \\sqlmap -h            |  \\sqlmap <sub> -h");
+        out.println("  Unknown \\cmd -> error + hint to \\help search");
     }
 
     private void handleExit(String rest) {
@@ -1244,12 +1492,16 @@ public final class ClientCommands {
         if (!p.endsWith(" ") && !p.endsWith(":")) {
             p = p + " ";
         }
-        if (session.config().batch) {
+        if (!session.config().canPromptForDefine()) {
+            // --define / 脚本 DEFINE 已赋值则跳过 ACCEPT (非交互 -E -f)
+            if (session.config().getDefine(name) != null) {
+                return;
+            }
             if (defVal != null) {
                 session.config().define(name, defVal);
                 return;
             }
-            err.println("Error: ACCEPT not allowed in batch mode (use DEFINE / --define)");
+            err.println("Error: ACCEPT requires a value (non-interactive; use DEFINE or --define)");
             return;
         }
         out.print(p);

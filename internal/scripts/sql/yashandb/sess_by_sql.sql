@@ -4,7 +4,6 @@
 -- Oracle ref: /Users/yihan/Documents/owner/sql/sess_by_sql.sql
 -- Note: WAIT_EVENT instead of EVENT; no LAST_CALL_ET/seq#
 
-UNDEFINE sql_text
 
 col i        for a2
 col sid_ser  for a16

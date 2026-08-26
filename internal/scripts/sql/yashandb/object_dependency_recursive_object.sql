@@ -7,9 +7,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE owner
-UNDEFINE object_name
-UNDEFINE object_type
 
 ACCEPT owner PROMPT 'Enter owner (e.g. SYS): '
 ACCEPT object_name PROMPT 'Enter object name (e.g. DBA_ALL_TABLES): '

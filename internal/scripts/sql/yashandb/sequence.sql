@@ -3,8 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/sequence.sql
 
-UNDEFINE owner
-UNDEFINE name
 
 col sequence_owner for a20
 col sequence_name  for a30

@@ -120,6 +120,7 @@ public final class Args {
     public static void usage() {
         System.out.println("yjdbc shell --url <jdbcUrl> --user <u> [--password <p>]");
         System.out.println("            [--script <file>] [--sql-home <dir>] [--batch]");
-        System.out.println("            [--define NAME=VALUE] [--max-rows N]");
+        System.out.println("            [--define NAME=VALUE]...   (repeatable; for -f / batch)");
+        System.out.println("            [--max-rows N]");
     }
 }

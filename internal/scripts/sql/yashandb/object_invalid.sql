@@ -3,7 +3,6 @@
 -- Created: 20260801 by huangtingzhong
 -- Oracle ref: /Users/yihan/Documents/owner/sql/object_invalid.sql
 
-UNDEFINE owner
 
 col own    for a15
 col name   for a40

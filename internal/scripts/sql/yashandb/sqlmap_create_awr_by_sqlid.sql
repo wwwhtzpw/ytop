@@ -18,12 +18,11 @@
 -- Path:
 --   1) CREATE SQLMAP via DBMS_SQL.PARSE(CLOB)+EXECUTE;
 --   2) If DBMS_SQL fails and gv$ hash is known: stub + UPDATE SYS.SQL_MAP$
---      then ALTER SYSTEM SET sql_map=TRUE to reload matcher.
+--      (does NOT run ALTER SYSTEM; print manual reload hint: sql_map=TRUE).
+-- Updated: 20260809 by huangtingzhong
 
 SET SERVEROUTPUT ON
 
-UNDEFINE source_sqlid
-UNDEFINE target_sqlid
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+
@@ -296,15 +295,11 @@ DECLARE
       'Patched SYS.SQL_MAP$: src_clob=' || v_gl_src ||
       ' tgt_clob=' || v_gl_tgt || ' hash=' || v_row_hash);
 
-    BEGIN
-      EXECUTE IMMEDIATE 'ALTER SYSTEM SET sql_map = TRUE';
-      DBMS_OUTPUT.PUT_LINE('Reloaded matcher: ALTER SYSTEM SET sql_map = TRUE');
-    EXCEPTION
-      WHEN OTHERS THEN
-        DBMS_OUTPUT.PUT_LINE(
-          'WARN: ALTER SYSTEM SET sql_map = TRUE failed: ' || SQLERRM ||
-          ' (SQL_MAP$ patched; mapping may stay inactive until sql_map is re-enabled)');
-    END;
+    -- UPDATE alone does not reload matcher; do not ALTER SYSTEM here.
+    DBMS_OUTPUT.PUT_LINE(
+      'WARN: SQL_MAP$ patched; matcher not reloaded by this script.');
+    DBMS_OUTPUT.PUT_LINE(
+      '  Reload manually if needed: ALTER SYSTEM SET sql_map = TRUE;');
 
     report_success('stub+UPDATE SQL_MAP$');
   END;

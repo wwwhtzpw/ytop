@@ -1,7 +1,7 @@
 -- File Name: sql.sql
 -- Purpose: YashanDB SQL tuning report (ORIGINAL+LITERAL SQL, plan, objects)
 -- Created: 20251201  by  huangtingzhong
--- Updated: 20260805 by huangtingzhong (fast bind pick: last_captured filter + PL/SQL position dedupe)
+-- Updated: 20260809 by huangtingzhong (LITERAL rewrite via CLOB; no 32K skip)
 
 set heading on;
 set serveroutput on;
@@ -14,9 +14,8 @@ DECLARE
   c_sqlid           CONSTANT VARCHAR2(64) := '&&sqlid';
   -- UTF8: SUBSTR into VARCHAR2(4000) may exceed byte limit; keep emit chunk small
   c_chunk           CONSTANT PLS_INTEGER := 1000;
-  c_varchar_limit   CONSTANT PLS_INTEGER := 32000;
 
-  lvc_sql_text      VARCHAR2(32000);
+  lvc_sql_text      CLOB;
   lvc_orig_sql_text CLOB;
   ln_child          NUMBER := 10000;
   ln_exec_child     NUMBER;
@@ -26,7 +25,6 @@ DECLARE
   lvc_repl          VARCHAR2(8000);
   lvc_bind          VARCHAR2(200);
   lvc_name          VARCHAR2(64);
-  lvc_sql_tmp       VARCHAR2(32767);
 
   ln_bind_count     NUMBER := 0;
   ln_sql_cnt        NUMBER := 0;
@@ -71,74 +69,23 @@ DECLARE
     END LOOP;
   END;
 
-  PROCEDURE put_varchar(p_text IN VARCHAR2) IS
-    v_len PLS_INTEGER;
-    v_off PLS_INTEGER := 1;
+  FUNCTION clob_char(p_clob IN CLOB, p_pos IN NUMBER) RETURN VARCHAR2 IS
   BEGIN
-    IF p_text IS NULL THEN
-      RETURN;
+    IF p_pos < 1 OR p_pos > NVL(DBMS_LOB.GETLENGTH(p_clob), 0) THEN
+      RETURN NULL;
     END IF;
-    v_len := NVL(LENGTH(p_text), 0);
-    WHILE v_off <= v_len LOOP
-      DBMS_OUTPUT.PUT_LINE(SUBSTR(p_text, v_off, c_chunk));
-      v_off := v_off + c_chunk;
-    END LOOP;
+    RETURN DBMS_LOB.SUBSTR(p_clob, 1, p_pos);
   END;
 
-  FUNCTION replace_first_outside_quotes(
-    p_text        IN VARCHAR2,
-    p_pattern     IN VARCHAR2,
-    p_replacement IN VARCHAR2
-  ) RETURN VARCHAR2 IS
-    v_pos      PLS_INTEGER := 1;
-    v_len      PLS_INTEGER := NVL(LENGTH(p_text), 0);
-    v_plen     PLS_INTEGER := NVL(LENGTH(p_pattern), 0);
-    v_in_quote BOOLEAN := FALSE;
-    v_result   VARCHAR2(32767) := '';
-    v_ch       CHAR(1);
-    v_next     CHAR(1);
+  FUNCTION is_ident_char(p_ch IN VARCHAR2) RETURN BOOLEAN IS
   BEGIN
-    IF v_len = 0 OR v_plen = 0 THEN
-      RETURN p_text;
+    IF p_ch IS NULL THEN
+      RETURN FALSE;
     END IF;
-
-    WHILE v_pos <= v_len LOOP
-      v_ch := SUBSTR(p_text, v_pos, 1);
-
-      IF v_ch = '''' THEN
-        IF v_in_quote
-           AND v_pos < v_len
-           AND SUBSTR(p_text, v_pos + 1, 1) = '''' THEN
-          v_result := v_result || '''''';
-          v_pos := v_pos + 2;
-        ELSE
-          v_in_quote := NOT v_in_quote;
-          v_result := v_result || v_ch;
-          v_pos := v_pos + 1;
-        END IF;
-      ELSIF NOT v_in_quote
-            AND v_pos + v_plen - 1 <= v_len
-            AND UPPER(SUBSTR(p_text, v_pos, v_plen)) = UPPER(p_pattern) THEN
-        v_next := CASE
-                    WHEN v_pos + v_plen <= v_len THEN SUBSTR(p_text, v_pos + v_plen, 1)
-                    ELSE NULL
-                  END;
-        IF p_pattern LIKE ':%'
-           AND v_next IS NOT NULL
-           AND v_next BETWEEN '0' AND '9' THEN
-          v_result := v_result || v_ch;
-          v_pos := v_pos + 1;
-        ELSE
-          RETURN v_result || p_replacement || SUBSTR(p_text, v_pos + v_plen);
-        END IF;
-      ELSE
-        v_result := v_result || v_ch;
-        v_pos := v_pos + 1;
-      END IF;
-    END LOOP;
-
-    RETURN v_result;
-  END replace_first_outside_quotes;
+    RETURN (p_ch >= '0' AND p_ch <= '9')
+        OR (UPPER(p_ch) >= 'A' AND UPPER(p_ch) <= 'Z')
+        OR p_ch = '_';
+  END;
 
   FUNCTION bind_pattern(p_name IN VARCHAR2) RETURN VARCHAR2 IS
     v_bare VARCHAR2(128);
@@ -171,31 +118,121 @@ DECLARE
     RETURN NULL;
   END bind_pattern_alt;
 
-  FUNCTION uses_question_bind(p_text IN VARCHAR2) RETURN BOOLEAN IS
-    v_pos      PLS_INTEGER := 1;
-    v_len      PLS_INTEGER := NVL(LENGTH(p_text), 0);
-    v_in_quote BOOLEAN := FALSE;
-    v_ch       CHAR(1);
+  FUNCTION find_question_clob(p_clob IN CLOB) RETURN NUMBER IS
+    v_p   NUMBER := 1;
+    v_len NUMBER := NVL(DBMS_LOB.GETLENGTH(p_clob), 0);
+    v_inq BOOLEAN := FALSE;
+    v_ch  VARCHAR2(8);
   BEGIN
-    WHILE v_pos <= v_len LOOP
-      v_ch := SUBSTR(p_text, v_pos, 1);
+    WHILE v_p <= v_len LOOP
+      v_ch := clob_char(p_clob, v_p);
       IF v_ch = '''' THEN
-        IF v_in_quote
-           AND v_pos < v_len
-           AND SUBSTR(p_text, v_pos + 1, 1) = '''' THEN
-          v_pos := v_pos + 2;
+        IF v_inq AND v_p < v_len AND clob_char(p_clob, v_p + 1) = '''' THEN
+          v_p := v_p + 2;
         ELSE
-          v_in_quote := NOT v_in_quote;
-          v_pos := v_pos + 1;
+          v_inq := NOT v_inq;
+          v_p := v_p + 1;
         END IF;
-      ELSIF NOT v_in_quote AND v_ch = '?' THEN
-        RETURN TRUE;
+      ELSIF NOT v_inq AND v_ch = '?' THEN
+        RETURN v_p;
       ELSE
-        v_pos := v_pos + 1;
+        v_p := v_p + 1;
       END IF;
     END LOOP;
-    RETURN FALSE;
-  END uses_question_bind;
+    RETURN 0;
+  END;
+
+  FUNCTION find_pattern_clob(p_clob IN CLOB, p_pattern IN VARCHAR2) RETURN NUMBER IS
+    v_p    NUMBER := 1;
+    v_len  NUMBER := NVL(DBMS_LOB.GETLENGTH(p_clob), 0);
+    v_plen NUMBER := NVL(LENGTH(p_pattern), 0);
+    v_inq  BOOLEAN := FALSE;
+    v_ch   VARCHAR2(8);
+    v_next VARCHAR2(8);
+    v_frag VARCHAR2(4000);
+  BEGIN
+    IF v_plen = 0 OR v_plen > 4000 THEN
+      RETURN 0;
+    END IF;
+    WHILE v_p <= v_len LOOP
+      v_ch := clob_char(p_clob, v_p);
+      IF v_ch = '''' THEN
+        IF v_inq AND v_p < v_len AND clob_char(p_clob, v_p + 1) = '''' THEN
+          v_p := v_p + 2;
+        ELSE
+          v_inq := NOT v_inq;
+          v_p := v_p + 1;
+        END IF;
+      ELSIF NOT v_inq AND v_p + v_plen - 1 <= v_len THEN
+        v_frag := DBMS_LOB.SUBSTR(p_clob, v_plen, v_p);
+        IF UPPER(v_frag) = UPPER(p_pattern) THEN
+          v_next := clob_char(p_clob, v_p + v_plen);
+          IF p_pattern LIKE ':%' AND is_ident_char(v_next) THEN
+            v_p := v_p + 1;
+          ELSE
+            RETURN v_p;
+          END IF;
+        ELSE
+          v_p := v_p + 1;
+        END IF;
+      ELSE
+        v_p := v_p + 1;
+      END IF;
+    END LOOP;
+    RETURN 0;
+  END;
+
+  PROCEDURE clob_splice_replace(
+    p_clob        IN OUT NOCOPY CLOB,
+    p_start       IN NUMBER,
+    p_match_len   IN NUMBER,
+    p_replacement IN VARCHAR2
+  ) IS
+    v_new CLOB;
+    v_len NUMBER;
+    v_off NUMBER;
+    v_amt NUMBER;
+    v_buf VARCHAR2(4000);
+  BEGIN
+    v_len := NVL(DBMS_LOB.GETLENGTH(p_clob), 0);
+    DBMS_LOB.CREATETEMPORARY(v_new, TRUE);
+
+    v_off := 1;
+    WHILE v_off < p_start LOOP
+      v_amt := LEAST(c_chunk, p_start - v_off);
+      v_buf := DBMS_LOB.SUBSTR(p_clob, v_amt, v_off);
+      DBMS_LOB.WRITEAPPEND(v_new, LENGTH(v_buf), v_buf);
+      v_off := v_off + v_amt;
+    END LOOP;
+
+    IF p_replacement IS NOT NULL AND LENGTH(p_replacement) > 0 THEN
+      DBMS_LOB.WRITEAPPEND(v_new, LENGTH(p_replacement), p_replacement);
+    END IF;
+
+    v_off := p_start + p_match_len;
+    WHILE v_off <= v_len LOOP
+      v_amt := LEAST(c_chunk, v_len - v_off + 1);
+      v_buf := DBMS_LOB.SUBSTR(p_clob, v_amt, v_off);
+      DBMS_LOB.WRITEAPPEND(v_new, LENGTH(v_buf), v_buf);
+      v_off := v_off + v_amt;
+    END LOOP;
+
+    IF DBMS_LOB.ISTEMPORARY(p_clob) = 1 THEN
+      DBMS_LOB.FREETEMPORARY(p_clob);
+    END IF;
+    p_clob := v_new;
+  END;
+
+  PROCEDURE clob_copy_from(p_src IN CLOB, p_dst IN OUT NOCOPY CLOB) IS
+  BEGIN
+    IF p_dst IS NOT NULL AND DBMS_LOB.ISTEMPORARY(p_dst) = 1 THEN
+      DBMS_LOB.FREETEMPORARY(p_dst);
+    END IF;
+    DBMS_LOB.CREATETEMPORARY(p_dst, TRUE);
+    IF p_src IS NOT NULL AND NVL(DBMS_LOB.GETLENGTH(p_src), 0) > 0 THEN
+      DBMS_LOB.APPEND(p_dst, p_src);
+    END IF;
+  END;
 
 BEGIN
   SELECT COUNT(*)
@@ -308,19 +345,8 @@ BEGIN
     RETURN;
   END IF;
 
-  IF ln_sql_len > c_varchar_limit THEN
-    DBMS_OUTPUT.PUT_LINE('===== LITERAL SQL =====');
-    DBMS_OUTPUT.PUT_LINE(
-      'WARN: SQL chars=' || TO_CHAR(ln_sql_len)
-      || ' > ' || TO_CHAR(c_varchar_limit)
-      || '; bind literal rewrite skipped (see ORIGINAL SQL)'
-    );
-    DBMS_OUTPUT.PUT_LINE('--------------------------------------------------------');
-    RETURN;
-  END IF;
-
-  -- short SQL: bind rewrite on VARCHAR2 copy of executed text
-  lvc_sql_text := DBMS_LOB.SUBSTR(lvc_orig_sql_text, ln_sql_len, 1);
+  -- CLOB bind rewrite (no 32K VARCHAR2 limit; same helpers as sql_pred / sql_bind)
+  clob_copy_from(lvc_orig_sql_text, lvc_sql_text);
   v_pos_seen.DELETE;
 
   FOR r1 IN c1(ln_exec_child) LOOP
@@ -332,12 +358,12 @@ BEGIN
       IF ln_child <> 10000 THEN
         DBMS_OUTPUT.PUT_LINE('===== LITERAL SQL =====');
         DBMS_OUTPUT.PUT_LINE('Schema: ' || lvc_name || ' child=' || TO_CHAR(ln_child));
-        put_varchar(lvc_sql_text);
+        put_clob(lvc_sql_text);
         DBMS_OUTPUT.PUT_LINE('--------------------------------------------------------');
       END IF;
 
-      ln_child     := r1.child_number;
-      lvc_sql_text := DBMS_LOB.SUBSTR(lvc_orig_sql_text, ln_sql_len, 1);
+      ln_child := r1.child_number;
+      clob_copy_from(lvc_orig_sql_text, lvc_sql_text);
     END IF;
 
     BEGIN
@@ -375,15 +401,15 @@ BEGIN
 
     -- 命名占位优先; 失败再回退第一个 ?
     IF lvc_bind IS NOT NULL THEN
-      lvc_sql_tmp := replace_first_outside_quotes(lvc_sql_text, lvc_bind, lvc_repl);
-      IF lvc_sql_tmp = lvc_sql_text AND bind_pattern_alt(r1.name) IS NOT NULL THEN
-        lvc_sql_tmp := replace_first_outside_quotes(
-          lvc_sql_text, bind_pattern_alt(r1.name), lvc_repl);
+      ln_qpos := find_pattern_clob(lvc_sql_text, lvc_bind);
+      IF ln_qpos = 0 AND bind_pattern_alt(r1.name) IS NOT NULL THEN
+        lvc_bind := bind_pattern_alt(r1.name);
+        ln_qpos := find_pattern_clob(lvc_sql_text, lvc_bind);
       END IF;
-      IF lvc_sql_tmp <> lvc_sql_text THEN
-        lvc_sql_text := lvc_sql_tmp;
+      IF ln_qpos > 0 THEN
+        clob_splice_replace(lvc_sql_text, ln_qpos, LENGTH(lvc_bind), lvc_repl);
       ELSE
-        ln_qpos := INSTR(lvc_sql_text, '?');
+        ln_qpos := find_question_clob(lvc_sql_text);
         IF ln_qpos = 0 THEN
           DBMS_OUTPUT.PUT_LINE(
             'ERROR: no placeholder for bind position=' || r1.position
@@ -391,13 +417,10 @@ BEGIN
           );
           RETURN;
         END IF;
-        lvc_sql_text :=
-          SUBSTR(lvc_sql_text, 1, ln_qpos - 1) ||
-          lvc_repl ||
-          SUBSTR(lvc_sql_text, ln_qpos + 1);
+        clob_splice_replace(lvc_sql_text, ln_qpos, 1, lvc_repl);
       END IF;
     ELSE
-      ln_qpos := INSTR(lvc_sql_text, '?');
+      ln_qpos := find_question_clob(lvc_sql_text);
       IF ln_qpos = 0 THEN
         DBMS_OUTPUT.PUT_LINE(
           'ERROR: no remaining ''?'' placeholders while replacing binds. ' ||
@@ -405,11 +428,7 @@ BEGIN
         );
         RETURN;
       END IF;
-
-      lvc_sql_text :=
-        SUBSTR(lvc_sql_text, 1, ln_qpos - 1) ||
-        lvc_repl ||
-        SUBSTR(lvc_sql_text, ln_qpos + 1);
+      clob_splice_replace(lvc_sql_text, ln_qpos, 1, lvc_repl);
     END IF;
     END IF; -- position dedupe
   END LOOP;
@@ -417,9 +436,10 @@ BEGIN
   DBMS_OUTPUT.PUT_LINE('===== LITERAL SQL =====');
   DBMS_OUTPUT.PUT_LINE(
     'Schema: ' || lvc_name || ' child=' || TO_CHAR(ln_exec_child)
+    || ' chars=' || TO_CHAR(NVL(DBMS_LOB.GETLENGTH(lvc_sql_text), 0))
     || ' (bind values from capture; not byte-identical to execute)'
   );
-  put_varchar(lvc_sql_text);
+  put_clob(lvc_sql_text);
   DBMS_OUTPUT.PUT_LINE('--------------------------------------------------------');
 END;
 /

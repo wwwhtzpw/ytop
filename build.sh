@@ -23,6 +23,11 @@ SQL_COLLECT_JAR="internal/scripts/os/sql_collect.jar"
 YJDBC_DIR="tool/yjdbc"
 YJDBC_JAR="internal/scripts/os/yjdbc.jar"
 
+# After linux/arm64 build: deploy to Parallels guest (passwordless SSH + sudo -n)
+DEPLOY_LINUX_ARM64_HOST="10.10.10.147"
+DEPLOY_LINUX_ARM64_USER="parallels"
+DEPLOY_LINUX_ARM64_PATH="/usr/bin/ytop"
+
 # Version information (China timezone)
 TZ_CN="Asia/Shanghai"
 VERSION=$(TZ=$TZ_CN date '+%Y%m%d_%H%M%S')
@@ -100,10 +105,65 @@ build_platform() {
                 fi
             fi
         fi
+
+        # Linux ARM64: upload to Parallels guest /usr/bin/ytop
+        if [ "$os" = "linux" ] && [ "$arch" = "arm64" ]; then
+            deploy_linux_arm64 "$output_path"
+        fi
     else
         print_msg "$RED" "✗ Failed to build ${os}/${arch}"
         return 1
     fi
+}
+
+# Deploy linux/arm64 binary to Parallels host (scp + sudo install).
+# Host unreachable / SSH unavailable -> skip (return 0), do not fail the build.
+deploy_linux_arm64() {
+    local local_bin=$1
+    local host="${DEPLOY_LINUX_ARM64_HOST}"
+    local user="${DEPLOY_LINUX_ARM64_USER}"
+    local remote_path="${DEPLOY_LINUX_ARM64_PATH}"
+    local remote_tmp="/tmp/${BINARY_NAME}.$$"
+    local ssh_opts=(-o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new)
+
+    if [ "${SKIP_DEPLOY_LINUX_ARM64:-}" = "1" ] || [ "${SKIP_DEPLOY_LINUX_ARM64:-}" = "true" ]; then
+        print_msg "$YELLOW" "  ⚠ Skip deploy to ${user}@${host}:${remote_path} (SKIP_DEPLOY_LINUX_ARM64)"
+        return 0
+    fi
+
+    if [ ! -f "$local_bin" ]; then
+        print_msg "$YELLOW" "  ⚠ Deploy skipped: binary not found: ${local_bin}"
+        return 0
+    fi
+
+    print_msg "$YELLOW" "Checking ${host} before deploy..."
+
+    # Reachability: TCP/22 via ssh; unreachable -> skip quietly for build
+    if ! ssh "${ssh_opts[@]}" "${user}@${host}" "true" 2>/dev/null; then
+        print_msg "$YELLOW" "  ⚠ ${user}@${host} not reachable (or no key login); skip deploy"
+        return 0
+    fi
+
+    if ! ssh "${ssh_opts[@]}" "${user}@${host}" "sudo -n true" 2>/dev/null; then
+        print_msg "$YELLOW" "  ⚠ sudo -n unavailable on ${host}; skip deploy"
+        return 0
+    fi
+
+    print_msg "$YELLOW" "Deploying Linux ARM64 to ${user}@${host}:${remote_path}..."
+
+    if ! scp "${ssh_opts[@]}" "$local_bin" "${user}@${host}:${remote_tmp}"; then
+        print_msg "$YELLOW" "  ⚠ scp failed; skip deploy"
+        return 0
+    fi
+
+    if ssh "${ssh_opts[@]}" "${user}@${host}" \
+        "sudo -n install -m 755 '${remote_tmp}' '${remote_path}' && rm -f '${remote_tmp}' && ls -la '${remote_path}' && '${remote_path}' -v 2>/dev/null | head -3 || true"; then
+        print_msg "$GREEN" "✓ Deployed to ${user}@${host}:${remote_path} (mode 755)"
+    else
+        print_msg "$YELLOW" "  ⚠ Remote install failed; skip (build continues)"
+        ssh "${ssh_opts[@]}" "${user}@${host}" "rm -f '${remote_tmp}'" 2>/dev/null || true
+    fi
+    return 0
 }
 
 # Compress binary with UPX
@@ -339,6 +399,13 @@ OUTPUT:
     Go binaries:     ${BUILD_DIR}/${BINARY_NAME}_<os>_<arch>[.exe]
     Companion jars:  ${SQL_COLLECT_JAR}
                      ${YJDBC_JAR}
+
+POST-BUILD (linux/arm64):
+    After a successful linux/arm64 build, if ${DEPLOY_LINUX_ARM64_HOST} is reachable
+    via passwordless SSH, upload to:
+      ${DEPLOY_LINUX_ARM64_USER}@${DEPLOY_LINUX_ARM64_HOST}:${DEPLOY_LINUX_ARM64_PATH}
+    (scp + sudo install -m 755). Unreachable host -> skip (build still succeeds).
+    Force skip: SKIP_DEPLOY_LINUX_ARM64=1 $0 ...
 
 PLATFORMS:
     Linux:   amd64, arm64

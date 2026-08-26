@@ -12,7 +12,6 @@
 
 SET SERVEROUTPUT ON
 
-UNDEFINE sqlid
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+

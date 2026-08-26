@@ -1,7 +1,7 @@
 -- File Name: sqlmap_create_by_sqlid.sql
 -- Purpose: Create SQLMAP from two gv$sql sql_ids via DBMS_SQL; fallback stub+UPDATE
 -- Created: 20260604  by  huangtingzhong
--- Updated: 20260803 by huangtingzhong
+-- Updated: 20260809 by huangtingzhong
 --
 -- Usage: yasql/ytop -f this_file (prompts for source_sql_id, target_sql_id)
 --   Empty target_sql_id: preview only (print CREATE SQLMAP DDL, no execute);
@@ -12,7 +12,7 @@
 -- Path:
 --   1) CREATE SQLMAP via DBMS_SQL.PARSE(CLOB)+EXECUTE (works past EXECUTE IMMEDIATE ~64K);
 --   2) If DBMS_SQL fails: short CREATE stub + UPDATE SYS.SQL_MAP$
---      then ALTER SYSTEM SET sql_map=TRUE to reload matcher (UPDATE alone is not enough).
+--      (does NOT run ALTER SYSTEM; print manual reload hint: sql_map=TRUE).
 -- On failure: print original SQLERRM + DDL when available; no re-raise.
 -- Backup: tmp/sqlmap_create_by_sqlid.sql.bak.20260803
 
@@ -199,16 +199,12 @@ DECLARE
       'Patched SYS.SQL_MAP$: src_clob=' || v_gl_src ||
       ' tgt_clob=' || v_gl_tgt || ' hash=' || v_row_hash);
 
-    -- UPDATE alone does not reload matcher; re-assert sql_map to pick up SQL_MAP$
-    BEGIN
-      EXECUTE IMMEDIATE 'ALTER SYSTEM SET sql_map = TRUE';
-      DBMS_OUTPUT.PUT_LINE('Reloaded matcher: ALTER SYSTEM SET sql_map = TRUE');
-    EXCEPTION
-      WHEN OTHERS THEN
-        DBMS_OUTPUT.PUT_LINE(
-          'WARN: ALTER SYSTEM SET sql_map = TRUE failed: ' || SQLERRM ||
-          ' (SQL_MAP$ patched; mapping may stay inactive until sql_map is re-enabled)');
-    END;
+    -- UPDATE alone does not reload matcher; do not ALTER SYSTEM here.
+    -- Operator must reload manually when needed.
+    DBMS_OUTPUT.PUT_LINE(
+      'WARN: SQL_MAP$ patched; matcher not reloaded by this script.');
+    DBMS_OUTPUT.PUT_LINE(
+      '  Reload manually if needed: ALTER SYSTEM SET sql_map = TRUE;');
 
     report_success('stub+UPDATE SQL_MAP$');
   END;

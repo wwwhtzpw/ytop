@@ -11,11 +11,6 @@ SET SERVEROUTPUT ON
 SET VERIFY OFF
 SET FEEDBACK OFF
 
-UNDEFINE owner
-UNDEFINE tablename
-UNDEFINE partname
-UNDEFINE colname
-UNDEFINE dryrun
 
 PROMPT Enter dryrun (Enter=1 print only, 0=execute):
 PROMPT Enter owner (required, non-system user):

@@ -4,8 +4,6 @@
 
 -- Params: &&owner (default all), &&table_name (default all)
 
-UNDEFINE owner;
-UNDEFINE table_name;
 
 COL owner       FOR A30
 COL table_name  FOR A30

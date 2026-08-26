@@ -9,7 +9,6 @@ SET SERVEROUTPUT ON
 SET VERIFY OFF
 SET FEEDBACK OFF
 
-UNDEFINE confirm
 
 PROMPT
 PROMPT +------------------------------------------------------------------------+
